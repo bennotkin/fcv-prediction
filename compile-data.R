@@ -1,3 +1,35 @@
+  # Countrylist
+  country_list <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/src/country-groups.csv") %>%
+    select(iso3 = Code)
+  
+  # Population data from WBG
+  get_pop <- function() {
+    url <- "http://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL"
+    queryString <- list(format = "json", date = "2000:2024", per_page = "30000")
+    response <- VERB("GET", url, body = "", query = queryString, content_type("application/octet-stream"), set_cookies(`api_http.cookie` = "2f4d39862a2fa1b0b0b0c4ad37e6251a"), encode = "raw")
+    pop <- jsonlite::fromJSON(content(response, "text"))[[2]] %>%
+      mutate(iso3 = countryiso3code, pop = value, year = as.numeric(date), .keep = "none")
+    return(pop)
+  }
+
+  pop <- get_pop()
+
+  starter <- left_join(country_list, pop, by = c("iso3")) %>%
+  filter(iso3 != "TWN") %>% # currently no pop data for it
+    mutate(
+      across(c(iso3), ~ factor(.x)),
+      year = factor(year, levels = 2000:2024),
+      month = paste(1:12, collapse = ",")) %>%
+    separate_longer_delim(month, delim = ",") %>%
+    mutate(month = as.numeric(month)) %>%
+    complete(iso3, year, month) %>%
+    group_by(iso3) %>%
+    fill(pop) %>%
+    ungroup() %>%
+    mutate(year = as.numeric(as.character(year))) %>%
+    arrange(year, month, iso3)
+
+
   # ACLED
   
   # Select the last 20 years of data
@@ -77,31 +109,34 @@ acled_monthly <- full_join(conflict_related_deaths, event_count, by = c("iso3", 
   rowwise() %>%
   mutate(ACLED_events = sum(ACLED_protests, ACLED_strategic_developments, ACLED_battles, ACLED_explosionsremote_violence, ACLED_riots, ACLED_violence_against_civilians, ACLED_Gang_Events, na.rm = T)) %>%
   ungroup() %>%
-  complete(iso3, year, month) %>%
+  complete(iso3, month) %>%
+  sjmisc::replace_na(contains("ACLED"), value = 0) %>%
   arrange(iso3, year, month) %>%
   mutate(
     .by = c(iso3),
     BRD_lag = sapply(1:12, \(l) lag(ACLED_conflict_related_deaths, l)),
     Events_lag = sapply(1:12, \(l) lag(ACLED_events, l))) %>%
-    rowwise() %>%
-    mutate(
-      ACLED_conflict_related_deaths_change = ACLED_conflict_related_deaths/mean(c_across(contains("BRD_lag")) - 1),
-      ACLED_events_change = ACLED_events/mean(c_across(contains("Events_lag"))) - 1) %>%
-      select(-matches("_lag$"))
+  rowwise() %>%
+  mutate(
+    ACLED_conflict_related_deaths_change = ACLED_conflict_related_deaths/mean(c_across(contains("BRD_lag")) - 1),
+    ACLED_events_change = ACLED_events/mean(c_across(contains("Events_lag"))) - 1) %>%
+  select(-matches("_lag$"))
 
-# Population data from WBG
-get_pop <- function() {
-  url <- "http://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL"
-  queryString <- list(format = "json", date = "2000:2024", per_page = "30000")
-  response <- VERB("GET", url, body = "", query = queryString, content_type("application/octet-stream"), set_cookies(`api_http.cookie` = "2f4d39862a2fa1b0b0b0c4ad37e6251a"), encode = "raw")
-  pop <- jsonlite::fromJSON(content(response, "text"))[[2]] %>%
-    mutate(iso3 = countryiso3code, pop = value, year = as.numeric(date), .keep = "none")
-  return(pop)
-}
-pop <- get_pop()
-
-acled_monthly <- full_join(acled_monthly, pop, by = c("year", "iso3")) %>%
+acled_monthly_all <- left_join(starter, ungroup(acled_monthly), by = c("iso3", "year", "month")) %>%
+  filter(year >= 2003) %>%
+  filter(!(year == 2024 & month > 2)) %>%
   mutate(ACLED_BRD_per_100k = ACLED_conflict_related_deaths/pop * 100000)
+
+summary(acled_monthly_all)
+acled_monthly_all[incomplete_cases(acled_monthly_all),] %>%
+  select(iso3, year) %>%
+  distinct() %>%
+  filter(year > 2016) %>%
+  distinct(iso3)
+
+# UCDP
+ucdp <- read_xlsx("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/UCDP/GEDEvent_v23_1.xlsx")
+
 
 # GIC
 gic <- read_tsv("http://www.uky.edu/~clthyn2/coup_data/powell_thyne_coups_final.txt",
@@ -113,7 +148,9 @@ gic <- read_tsv("http://www.uky.edu/~clthyn2/coup_data/powell_thyne_coups_final.
   summarize(
     .by = c(iso3, year, month),
     across(.cols = contains("GIC"), ~ sum(.x, na.rm = T)))
-
+gic <- filter(gic, year > 2000)
+gic <- left_join(starter, gic, by = c("iso3", "year", "month")) %>%
+  sjmisc::replace_na(contains("GIC"), value = 0)
 # IFES
 # ifes_data <- system(paste0("curl -X GET https://electionguide.org/api/v1/elections_demo/ -H 'Authorization: Token ", readLines(".access/ifes-authorization.txt", warn = F),"'"),
 #    intern = T) %>%
@@ -135,6 +172,8 @@ reign <- reign %>%
   reign <- reign %>%
     mutate(iso3 = factor(iso3)) %>%
     summarize(.by = c(iso3, year, month), across(contains("REIGN"), max, na.rm = T))
+reign <- left_join(starter, reign, by = c("iso3", "year", "month")) %>%
+  sjmisc::replace_na(contains("REIGN"), value = 0)
 
 reign %>% count(iso3, year, month) %>% filter(n > 1) 
 
@@ -170,6 +209,23 @@ fews_proportions <- fews_proportions %>%
   rename_with(.cols = contains('ipc'), ~ paste0("FEWS_", .x)) %>%
   select(iso3, year, month, contains("FEWS"))
 
+# 4-month projected insecurity
+fews_proportions_proj_near <- fews %>%
+  select(-contains('fews'), fews_proj_near) %>%
+  # filter(!is.na(fews_proj_med)) %>%
+  pivot_wider(names_from = fews_proj_near, values_from = country_pop_proportion, names_prefix = "ipc") %>%
+  rename_with(.cols = contains("ipc"), ~ paste0(.x, "_4month")) %>%
+  summarize(.by = c(country, year, month), across(.cols = contains("ipc"), ~ sum(.x, na.rm = T))) %>%
+  rowwise() %>% 
+  mutate(proportion_sum = sum(c_across(contains("ipc")))) %>%
+  ungroup()
+# Verify proprotions add up
+stopifnot(abs(1 - fews_proportions_proj_near$proportion_sum) < 0.01)
+fews_proportions_proj_near <- fews_proportions_proj_near %>%
+  mutate(iso3 = name2iso(country)) %>%
+  rename_with(.cols = contains('ipc'), ~ paste0("FEWS_", .x)) %>%
+  select(iso3, year, month, contains("FEWS"))
+
 # 8-month projected insecurity
 fews_proportions_proj_med <- fews %>%
   select(-contains('fews'), fews_proj_med) %>%
@@ -186,15 +242,20 @@ fews_proportions_proj_med <- fews_proportions_proj_med %>%
   mutate(iso3 = name2iso(country)) %>%
   rename_with(.cols = contains('ipc'), ~ paste0("FEWS_", .x)) %>%
   select(iso3, year, month, contains("FEWS"))
-fews_monthly <- full_join(fews_proportions, fews_proportions_proj_med, by = c("iso3", "year", "month"))
+fews_monthly <- full_join(fews_proportions, fews_proportions_proj_near, by = c("iso3", "year", "month")) %>%
+  full_join(fews_proportions_proj_med, by = c("iso3", "year", "month"))
+fews_monthly <- left_join(starter, fews_monthly, by = c("iso3", "year", "month")) %>%
+  fill(contains("FEWS"))
+
 
 # Food Price Inflation
-fpi <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/hosted-data/food-price-inflation/WLD_RTFP_country_2024-01-08.csv") %>%
-  rename(iso3 = ISO3, Food_Price_Inflation = Inflation) %>%
-  mutate(year = year(date),
-  month = month(date)) %>%
-  select(iso3, year, month, Food_Price_Inflation) %>%
-  filter(!is.na(Food_Price_Inflation))
+# fpi <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/hosted-data/food-price-inflation/WLD_RTFP_country_2024-01-08.csv") %>%
+#   rename(iso3 = ISO3, Food_Price_Inflation = Inflation) %>%
+#   mutate(year = year(date),
+#   month = month(date)) %>%
+#   select(iso3, year, month, Food_Price_Inflation) %>%
+#   filter(!is.na(Food_Price_Inflation))
+# fpi <- left_join(starter, fpi, by = c("iso3", "year", "month"))
 
 # EIU
 eiu <- read_csv("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/eiu-operational-risk-macroeconomic-2002-2024.csv",
@@ -206,6 +267,8 @@ eiu <- read_csv("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/eiu-op
     year = str_sub(yearmon, 1, 4),
     month = str_sub(yearmon, -2, -1)) %>%
   select(-yearmon)
+  eiu <- left_join(starter, eiu, by = c("iso3", "year", "month")) %>%
+    fill(contains("EIU"))
 
 # FSI
 # fsi <- read_most_recent('hosted-data/fsi', FUN = read_xlsx, as_of = Sys.Date(), return_date = F)
@@ -265,6 +328,7 @@ emdat <- emdat_full %>%
       start_day = case_when(is.na(start_day) ~ "1", T ~ start_day),
       end_day = case_when(is.na(end_day) ~ "28", T ~ end_day),
     affected = `Total Affected`, deaths = `Total Deaths`, damage = `Total Damage, Adjusted ('000 US$)`,
+    declaration = Declaration == "Yes",
     across(.cols = c(starts_with("start", ignore.case = F), starts_with("end", ignore.case = F), affected, deaths, damage), ~ as.numeric(.x)),
     start_date = as.Date(paste(start_year, start_month, start_day, sep = "-")),
     end_date = as.Date(paste(end_year, end_month, end_day, sep = "-")))
@@ -288,19 +352,29 @@ emdat <- emdat_full %>%
         across(c(affected, deaths, damage), ~ sum(.x, na.rm = T)),
         disaster_days = n(),
         disasters = length(unique(disno)))
-  emdat_events <- emdat %>%
+  # emdat_events <- emdat %>%
+  #   mutate(
+  #     year = lubridate::year(date),
+  #     month = lubridate::month(date)) %>%
+  #   select(disno, iso3, disaster_type, year, month) %>%
+  #   distinct() %>%
+  #   mutate(event = 1) %>%
+  #   pivot_wider(names_from = disaster_type, values_from = event, names_prefix = "EMDAT_") %>%
+  #   setNames(nm = slugify(names(.), tolower = F)) %>%
+  #   ungroup() %>%
+  #   group_by(iso3, year, month) %>%
+  #   summarize(across(contains("EMDAT"), ~ sum(.x, na.rm = T)))
+  emdat_declarations <- emdat %>%
+    ungroup() %>%
     mutate(
       year = lubridate::year(date),
       month = lubridate::month(date)) %>%
-    select(disno, iso3, disaster_type, year, month) %>%
+    select(disno, iso3, year, month, declaration) %>% 
     distinct() %>%
-    mutate(event = 1) %>%
-    pivot_wider(names_from = disaster_type, values_from = event, names_prefix = "EMDAT_") %>%
-    setNames(nm = slugify(names(.), tolower = F)) %>%
-    ungroup() %>%
-    group_by(iso3, year, month) %>%
-    summarize(across(contains("EMDAT"), ~ sum(.x, na.rm = T)))
-emdat <- full_join(emdat_effect, emdat_events, by = c("iso3", "year", "month"))
+    summarize(.by = c("iso3", "year", "month"), EMDAT_declarations = sum(declaration))
+emdat <- full_join(emdat_effect, emdat_declarations, by = c("iso3", "year", "month"))
+# emdat_monthly <- left_join(starter, emdat, by = c("iso3", "year", "month"))
+# emdat_monthly %>% summary()
 
 # V-DEM
 # vdem <- read_csv("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/V-Dem-CY-Full+Others-v13.csv")
@@ -381,6 +455,7 @@ idmc <- read_xlsx("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/Disp
 variables <- Reduce(
   function(a, b) {
     b <- filter(b, year >= 2000)
+    b <- select(b, -any_of("pop"))
     if (typeof(b$year) != "double") b$year = as.numeric(b$year)
     if (typeof(b$month) != "double") b$month = as.numeric(b$month)
     length_check <- count(b, iso3, year, month) %>% filter(n > 1)
@@ -392,14 +467,15 @@ variables <- Reduce(
     full_join(a, b, by = c("iso3", "year", "month"))
   },
  list(
-    acled_monthly,
+    starter,
+    acled_monthly_all,
     gic,
     fews_monthly,
     reign,
     cpi,
-    fpi,
+    # fpi,
     eiu,
-    inform,
+    # inform,
     cpia,
     gdp,
     wgi,
@@ -428,15 +504,25 @@ variables <- variables %>%
   mutate(
     trigger_total_risk =
       (ACLED_conflict_related_deaths > 20 & ACLED_BRD_per_100k > 0.2) |
-      (ACLED_events > 25 & (GIC_coup_failed | GIC_coup_successful)),
+      (GIC_coup_failed | GIC_coup_successful) |
+      (REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1),
     trigger_change_risk =
-      ((ACLED_conflict_related_deaths > 10 & ACLED_BRD_per_100k > 0.1) |
-        (ACLED_BRD_per_100k > 0.1 & ACLED_conflict_related_deaths_change > .25)) &
-      ((ACLED_events_change > .25 | GIC_coup_failed | GIC_coup_successful))
-    )
+      ( ACLED_conflict_related_deaths > 10 &
+        ACLED_BRD_per_100k > 0.1 &
+        ACLED_conflict_related_deaths_change > .25) |
+      ( ACLED_events > 5 & ACLED_events_change > .25 ) |
+      ( GIC_coup_failed | GIC_coup_successful) |
+      ( REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1))
+
+write_csv(variables, "/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/fcv-prediction-variables.csv")
+
+variables
 
 variables %>% summary()
 
 variables %>%
   select(iso3, year, month, ACLED_conflict_related_deaths, ACLED_BRD_per_100k, ACLED_events, GIC_coup_failed, GIC_coup_successful) %>%
   summary()
+
+reign %>% filter(REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1) %>%
+select(iso3, year) %>% distinct() %>% mutate()
