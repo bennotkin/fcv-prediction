@@ -464,7 +464,7 @@ variables <- Reduce(
       print(length_check)
       stop("More than one value per country-month")
     }
-    full_join(a, b, by = c("iso3", "year", "month"))
+    left_join(a, b, by = c("iso3", "year", "month"))
   },
  list(
     starter,
@@ -514,7 +514,7 @@ variables <- variables %>%
       ( GIC_coup_failed | GIC_coup_successful) |
       ( REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1))
 
-write_csv(variables, "/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/fcv-prediction-variables.csv")
+write_csv(variables, "/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/fcv-prediction-variables-2.csv")
 
 variables
 
