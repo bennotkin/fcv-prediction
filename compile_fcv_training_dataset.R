@@ -551,6 +551,17 @@ imf <- read_csv("source-data/rsui_events_by_type.csv") %>%
   select(-pop) %>%
   sjmisc::replace_na(contains("IMF"), value = 0)
 
+# ADD SPEI --------------------------------------------------------------------
+spei <- read_csv("source-data/df_spei-world_1990-2022.csv") %>%
+  setNames(str_replace_all(names(.), "-+|\\.", "_")) %>%
+  mutate(
+    year = lubridate::year(date),
+    month = lubridate::month(date), .keep = "unused")
+# Make sure all years and all months appear in dataset; they do
+stopifnot("Not all years 2000-2022 appear in dataset" = length(which_not(2000:2022, spei$year)) == 0)
+stopifnot("Not all months appear in dataset" = length(which_not(1:12, spei$month)) == 0)
+spei <- complete(spei, iso3, year, month)
+
 # Combine all relevant datasets together---------------------------------------
 variables <- Reduce(
   function(a, b) {
@@ -568,15 +579,18 @@ variables <- Reduce(
     left_join(a, b, by = c("iso3", "year", "month"))
   },
   list(
+    # Starter data frame of countries, years and months
     starter,
+    # Outcome variables
     acled_monthly,
     ucdp_monthly,
     gic,
-    fews_monthly,
     reign_monthly,
+    # Predictor variables
+    fews_monthly,
+    # fpi,
     fsi_monthly,
     cpi,
-    # fpi,
     eiu,
     # inform,
     cpia,
@@ -585,6 +599,7 @@ variables <- Reduce(
     v_dem,
     gii,
     emdat,
+    spei,
     imf)) %>%
   arrange(iso3, year, month) %>%
   mutate(iso3 = factor(iso3))
