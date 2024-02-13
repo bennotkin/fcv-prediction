@@ -486,12 +486,12 @@ cpi <- read_xlsx("source-data/Inflation-data.xlsx",
   select(-yearmon)
 
 # Add WBG Worldwide Governance Indicator---------------------------------------
-wgi_long <- 2:7 %>%
+wgi <- 2:7 %>%
   lapply(function(s) {
     name <- read_xlsx("source-data/wgidataset.xlsx",
       sheet = s, range = "A1:A1", col_names = F) %>% pull()
     sheet <- read_xlsx("source-data/wgidataset.xlsx",
-      sheet = s, skip = 13, col_types = "text")
+      sheet = s, skip = 13, col_types = "text", na = c("", "#N/A"))
     estimate <- sheet[-c(1,2), c(2, which(sheet[1,] == "Estimate"))] %>%
       rename(iso3 = `...2`) %>%
       pivot_longer(cols = -1, names_to = "year", values_to = "value") %>%
