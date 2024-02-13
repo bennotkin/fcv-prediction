@@ -4,13 +4,13 @@
 #   DATE: February 2024
 #-------------------------------------------------------------------------------
 #   Notes: For updated version of the R script use the link below in Github repo
-#   https://github.com/bennotkin/fcv-prediction/blob/main/compile-data.R
+#   https://github.com/bennotkin/fcv-prediction/blob/main/compile_fcv_training_dataset.R
 #   Please be aware that source files can be found in the shared Office folder
 #   File locations in the R code should be replaced with relevant local source
 
 #Load packages------------------------------------------------------------------
-# Install packages from CRAN
-# install.packages("librarian")
+# Install packages from CRAN using librarian
+install.packages("librarian")
 librarian::shelf(
   "curl", "countrycode", "httr", "httr2", "jsonlite","lubridate", "purrr", "readr",
   "readxl", "sjmisc", "stringr", "tidyr", "zoo")
@@ -424,7 +424,8 @@ emdat <- emdat_full %>%
         .by = c(iso3, year, month),
         across(c(affected, deaths, damage), ~ sum(.x, na.rm = T)),
         disaster_days = n(),
-        disasters = length(unique(disno)))
+      disasters = length(unique(disno))) %>%
+    rename_with(~ paste0("EMDAT_", .x), .cols = -c(iso3, year, month))
   # emdat_events <- emdat %>%
   #   mutate(
   #     year = lubridate::year(date),
@@ -544,7 +545,9 @@ imf <- read_csv("source-data/rsui_events_by_type.csv") %>%
     IMF_unrest_event = case_when(any.event ~ 1, T ~ 0),
     IMF_unrest_event_major = case_when(major.event ~ 1, T ~ 0)) %>%
   summarize(.by = c("iso3", "year", "month"), across(contains("IMF"), ~ sum(.x))) %>%
-  right_join(starter, by = c("iso3", "year", "month")) %>%
+  full_join(
+    filter(starter, iso3 %in% .$iso3),
+    by = c("iso3", "year", "month")) %>%
   select(-pop) %>%
   sjmisc::replace_na(contains("IMF"), value = 0)
 
@@ -619,8 +622,8 @@ variables <- variables %>%
       ( UCDP_BRD > 10 & UCDP_BRD_per_100k > 0.1 & UCDP_BRD_change > .25) |
       ( ACLED_events > 5 & ACLED_events_change > .25 ) |
       ( GIC_coup_failed | GIC_coup_successful) |
-      ( REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1)) #%>%
+      ( REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1)) %>%
     # Remove transformed variables
-    # select(-ACLED_conflict_related_deaths_change, -ACLED_events_change)
+    select(-ACLED_conflict_related_deaths_change, -ACLED_events_change, -UCDP_BRD_change)
 
-write_csv(variables, "fcv-prediction-variables.csv")
+write_csv(variables, "FCV_training_dataset.csv")
