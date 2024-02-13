@@ -520,9 +520,15 @@ gii <- read_csv("source-data/UNDP_historic dataset (composite, see GII).csv") %>
 
 # Add IDMC Forced displacement-------------------------------------------------
 idmc <- read_xlsx("source-data/Displacement (IDMC & UNHCR)/IDMC_Internal_Displacement_Conflict-Violence_Disasters 2008-2022.xlsx") %>%
-  select(iso3 = ISO3, year = Year, IDMC_IDPs = `Conflict Stock Displacement (Raw)`) %>%
+  select(
+    iso3 = ISO3, year = Year,
+    IDMC_IDPs_conflict = `Conflict Stock Displacement (Raw)`,
+    IDMC_IDPs_disaster = `Disaster Stock Displacement (Raw)`) %>%
+  rowwise() %>%
   mutate(
+    IDMC_IDPs_combined = sum(IDMC_IDPs_conflict, IDMC_IDPs_disaster, na.rm = T),
     month = paste(1:12, collapse = ",")) %>%
+  ungroup() %>%
   separate_longer_delim(month, delim = ",")
 
 # Add IMF Social Unrest--------------------------------------------------------
@@ -600,6 +606,7 @@ variables <- Reduce(
     gii,
     emdat,
     spei,
+    idmc,
     imf)) %>%
   arrange(iso3, year, month) %>%
   mutate(iso3 = factor(iso3))
