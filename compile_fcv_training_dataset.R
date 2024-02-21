@@ -10,10 +10,10 @@
 
 #Load packages------------------------------------------------------------------
 # Install packages from CRAN using librarian
-install.packages("librarian")
+if (!"librarian" %in% installed.packages()) install.packages("librarian")
 librarian::shelf(
   "curl", "countrycode", "httr", "httr2", "jsonlite","lubridate", "purrr", "readr",
-  "readxl", "sjmisc", "stringr", "tidyr", "zoo")
+  "readxl", "sjmisc", "stringr", "tidyr", "zoo", "dplyr")
 # Install helper functions from GitHub
 source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
 # Install vdemdata package from GitHub
@@ -21,9 +21,7 @@ devtools::install_github("vdeminstitute/vdemdata")
 
 # Compile list of countries using iso3 codes-------------------------------------
 country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c")) %>%
-  select(iso3 = Code) %>%
-  filter(iso3 != "CHI")
+    col_types = cols(.default = "c"))
   
 # Add population country-level population data sourcd from WBG API--------------
 get_pop <- function() {
@@ -37,7 +35,10 @@ get_pop <- function() {
 pop <- get_pop()
 
 # Create starter dataframe with all country-year-months
-starter <- left_join(country_list, pop, by = c("iso3")) %>%
+starter <- country_list %>%
+  select(iso3 = Code) %>%
+  filter(iso3 != "CHI") %>%
+  left_join(pop, by = c("iso3")) %>%
   # No WBG population data for Taiwan
   filter(iso3 != "TWN") %>%
   bind_rows(data.frame(iso3 = "TWN", pop = NA, year = 2000:2024)) %>%
@@ -179,6 +180,13 @@ lending_categories_all_iso <- lending_categories_all_months %>%
   sjmisc::replace_na(starts_with("WBG_lend_cat"), WBG_category_change, value = 0)
 
 # Add ACLED dataset-------------------------------------------------------------
+if (!file.exists("source-data/acled-processed.csv")) {
+  run_acled <- T 
+} else {
+  run_acled <- menu(c("Yes", "No"), title = "Re-download ACLED?") == 1
+}
+
+if (run_acled) {
 # Build API query (will run numerous times until all events are acquired)
 # Select relevant fields from ACLED database 
 fields <- "event_id_cnty|iso|event_date|event_type|fatalities|disorder_type|sub_event_type|actor1|actor2|assoc_actor_1|assoc_actor_2"
@@ -231,6 +239,11 @@ acled <- acled %>%
     str_detect(actor2, "Unidentified Gang") | str_detect(actor2, "Unidentified Armed Group") |
     str_detect(assoc_actor_1, "Unidentified Gang") | str_detect(assoc_actor_1, "Unidentified Armed Group") |
     str_detect(assoc_actor_2, "Unidentified Gang") | str_detect(assoc_actor_2, "Unidentified Armed Group"))
+
+  write_csv(acled, "source-data/acled-processed.csv")
+} else {
+  acled <- read_csv("source-data/acled-processed.csv", col_types = "cdcDddfdffccccl")
+}
 
 # Number of conflict related deaths
 conflict_related_deaths <- acled %>% 
@@ -377,7 +390,8 @@ reign_monthly <- left_join(starter, reign, by = c("iso3", "year", "month")) %>%
 # response <- VERB("GET", url, query = queryString)
 # metadata <- fromJSON(content(response, "text"))
 # version_date <- as.Date(str_extract(basename(metadata$distribution$url), "20\\d{2}-\\d{1,2}-\\d{1,2}"))
-filename <- file.path("source-data", paste0("fews-", version_date, ".csv"))
+# filename <- file.path("source-data", paste0("fews-", version_date, ".csv"))
+filename <- "source-data/fews-2024-01-16.csv"
 # curl::curl_download(url = metadata$distribution$url, destfile = filename)
 fews <- read_csv(filename, col_types = cols(.default = "c")) %>%
   mutate(across(.cols = c(admin_code, year, month, contains("fews"), pop), ~ as.numeric(.x))) %>%
