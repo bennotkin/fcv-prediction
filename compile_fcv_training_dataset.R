@@ -58,6 +58,126 @@ starter <- left_join(country_list, pop, by = c("iso3")) %>%
   # Remove months after February 2024
   filter(!(year == 2024 & month > 2))
 
+# Income-levels and lending categories
+income_sheet <- "Country Analytical History"
+# Income classifications are set on July 1, to start each fiscal year. This is
+# when I will begin the month classification. However, the data is based on the
+# previous calendar year's data. E.g., for FY24, classifications changed on 
+# 1 July 2023 based on data from 1 January 2022 to 31 December 2022.
+# Below, I add 1.5 years to the data year to mark the month of the new
+# classification, at the start of the fiscal year.
+income_level_headers <- c(
+  "iso3", "country",
+  unlist(read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
+                   range = "C5:AL6", col_names = T)))
+income_levels <- read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
+                           range = "A12:AL238", col_names = income_level_headers,
+                           col_types = "text", na = "..") %>%
+  filter(!is.na(iso3)) %>%
+  pivot_longer(
+    cols = -c(iso3, country), names_to = "data_year", values_to = "income_level",
+    names_transform = as.numeric) %>%
+  filter(data_year > 1999 & !is.na(income_level)) %>%
+  mutate(
+    iso3 = factor(iso3),
+    income_level = factor(income_level, levels = c("L", "LM", "LM*", "UM", "H"), labels = c("lower_income", "lower_middle_income", "lower_middle_income", "upper_middle_income", "upper_income")),
+    FY = data_year + 2,
+    FY_yearmon = as.yearmon(FY - 0.5),
+    year = lubridate::year(FY_yearmon),
+    month = lubridate::month(FY_yearmon)) %>%
+  # Separate Serbia and Montenegro into two countries; doing so gives the same
+  # income level to both countries for FY92-FY07 (not sure I want to do this,
+  # I should actually be including YUG in the dataset as YUG for relevant years)
+  mutate(iso3 = str_replace(iso3, "^YUG$", "SRB,MNE")) %>%
+  separate_longer_delim(iso3, delim = ",") %>%
+  # Add in all months, with data starting at the start of the fiscal year
+  right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
+  arrange(iso3, year, month) %>%
+  group_by(iso3) %>%
+  mutate(data_year = case_when(is.na(income_level) ~ NA, T ~ data_year)) %>%
+  fill(data_year, FY) %>% ungroup() %>%
+  mutate(.by = c(iso3, FY), no_data = all(is.na(income_level))) %>%
+  group_by(iso3) %>%
+  fill(income_level, .direction = "down") %>% ungroup() %>%
+  filter(!is.na(income_level)) %>%
+  # mutate(income_level = case_when(no_data ~ NA, T ~ income_level)) %>%
+  mutate(income_level_months_stale = 12 * as.numeric(
+          as.yearmon(paste(year, month, sep = "-")) - data_year - 1)) %>%
+  # Replace income_level with ordinal version
+  mutate(
+    WBG_income_level = as.numeric(income_level),
+    # Create separate columns for each income level
+    WBG_lower_income = case_when(WBG_income_level == 1 ~ 1, T ~ 0),
+    WBG_lower_middle_income = case_when(WBG_income_level == 2 ~ 1, T ~ 0),
+    WBG_upper_middle_income = case_when(WBG_income_level == 3 ~ 1, T ~ 0),
+    WBG_upper_income = case_when(WBG_income_level == 4 ~ 1, T ~ 0)) %>%
+  select(iso3, year, month,
+         WBG_income_level, WBG_income_level_months_stale = income_level_months_stale, ends_with("income"))
+
+lending_categories <- read_xlsx("source-data/OGHIST.xlsx",
+                              sheet = "Operational Category Change",
+                              range = "A10:D519", col_types = "text") %>%
+  filter(!is.na(`Fiscal year`)) %>%
+  mutate(
+    FY = case_when(
+      str_sub(`Fiscal year`, 3, 3) > 3 ~ str_replace(`Fiscal year`, "FY", "19"),
+      str_sub(`Fiscal year`, 3, 3) < 3 ~ str_replace(`Fiscal year`, "FY", "20")),
+    FY = as.numeric(FY),
+    # yearmon = as.yearmon(FY - 0.5),
+    iso3 = name2iso(Country),
+    iso3 = case_when(
+      Country == "Czechoslovakia" ~ "CZE, SVK",
+      T ~ iso3)) %>%
+  separate_longer_delim(iso3, delim = ", ")
+initial_categories <- lending_categories %>%
+  slice_min(by = Country, order_by = FY) %>%
+  select(iso3, category = From) %>%
+  mutate(FY = 1979) 
+category_changes <- lending_categories %>%
+  select(iso3, FY, category = To)
+lending_categories <- bind_rows(initial_categories, category_changes) %>%
+# The documents classifications change in 2009: "Beginning in FY09, the number
+# of IBRD levels are reduced in accordance with the Memorandum to the Executive
+# Directors dated January 17, 2008 (R2008-0007). Level II becomes the effective
+# IDA eligibility threshold with the historic IDA eligibility threshold footnoted;
+# Level III is described as "IBRD terms"; Level IV becomes "IBRD Graduation". As
+# a result, categories are not strictly comparable to those used in previous years.			
+  mutate(
+    WBG_lending_category = as.numeric(case_when(
+      FY < 2009 ~ str_replace_all(category, c(
+                    "^I$" = "1", "^II$" = "2", "^III|IV$" = "3", "^V$" = "4")),
+      FY >= 2009 ~ str_replace_all(category, c(
+              "^I$" = "1", "^II$" = "2", "^III$" = "3", "^IV$" = "4")))))
+all_months <- tibble(
+  year = factor(1978, levels = 1978:2024),
+  month = factor(1, levels = 1:12),
+  iso3 = factor("CHL", levels = unique(lending_categories$iso3))) %>%
+  complete(year, month, iso3) %>%
+  mutate(across(c(year, month), ~ as.numeric(as.character(.x))))
+lending_categories_all_months <- lending_categories %>%
+  filter(!is.na(WBG_lending_category)) %>%
+  mutate(
+    yearmon = as.yearmon(FY - 0.5),
+    year = lubridate::year(yearmon),
+    month = lubridate::month(yearmon)) %>%
+  full_join(all_months, by = c("iso3", "year", "month")) %>%
+  arrange(iso3, year, month) %>%
+  group_by(iso3) %>%
+  fill(WBG_lending_category) %>%
+  ungroup() %>%
+  mutate(
+    # Create separate columns for each lending category
+    WBG_lend_cat_civil_works = case_when(WBG_lending_category == 1 ~ 1, T ~ 0),
+    WBG_lend_cat_ida = case_when(WBG_lending_category == 2 ~ 1, T ~ 0),
+    WBG_lend_cat_ibrd = case_when(WBG_lending_category == 3 ~ 1, T ~ 0),
+    WBG_lend_cat_ibrd_grad = case_when(WBG_lending_category == 4 ~ 1, T ~ 0)) %>%
+  select(iso3, year, month, starts_with("WBG_")) %>%
+  mutate(.by = iso3, WBG_category_change = WBG_lending_category - lag(WBG_lending_category)) %>%
+  filter(year > 1999 & !is.na(WBG_lending_category))
+lending_categories_all_iso <- lending_categories_all_months %>%
+  right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
+  sjmisc::replace_na(starts_with("WBG_lend_cat"), WBG_category_change, value = 0)
+
 # Add ACLED dataset-------------------------------------------------------------
 # Build API query (will run numerous times until all events are acquired)
 # Select relevant fields from ACLED database 
@@ -607,7 +727,9 @@ variables <- Reduce(
     emdat,
     spei,
     idmc,
-    imf)) %>%
+    imf,
+    income_levels,
+    lending_categories_all_iso)) %>%
   arrange(iso3, year, month) %>%
   mutate(iso3 = factor(iso3))
 
