@@ -784,4 +784,6 @@ variables <- variables %>%
     # Remove transformed variables
     select(-ACLED_conflict_related_deaths_change, -ACLED_events_change, -UCDP_BRD_change)
 
-write_csv(variables, "FCV_training_dataset.csv")
+write_csv(
+  variables %>% filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3)),
+  "FCV_training_dataset.csv")
