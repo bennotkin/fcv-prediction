@@ -504,6 +504,8 @@ fsi_monthly <- left_join(fsi, starter, by = c("iso3", "year"))
 #   separate_longer_delim(month, delim = ",")
 
 # Add CPIA --------------------------------------------------------------------
+# For API, see https://api.worldbank.org/v2/sources/31/indicators
+# Most recent data, with XLSX and API 
 cpia <- read_xlsx("source-data/CPIA.xlsx", sheet = "Data",
   na = c("NA", "", "..")) %>%
   filter(`Series Name` == "IDA resource allocation index (1=low to 6=high)") %>%
@@ -657,39 +659,92 @@ idmc <- read_xlsx("source-data/Displacement (IDMC & UNHCR)/IDMC_Internal_Displac
   select(
     iso3 = ISO3, year = Year,
     IDMC_IDPs_conflict = `Conflict Stock Displacement (Raw)`,
-    IDMC_IDPs_disaster = `Disaster Stock Displacement (Raw)`) %>%
+    IDMC_IDPs_disaster = `Disaster Stock Displacement (Raw)`,
+    IDMC_ID_movements_conflict = `Conflict Internal Displacements (Raw)`,
+    IDMC_ID_movements_disaster = `Disaster Internal Displacements (Raw)`) %>%
   rowwise() %>%
   mutate(
     IDMC_IDPs_combined = sum(IDMC_IDPs_conflict, IDMC_IDPs_disaster, na.rm = T),
+    IDMC_ID_movemments_combined = sum(IDMC_ID_movements_conflict, IDMC_ID_movements_disaster, na.rm = T),
     month = paste(1:12, collapse = ",")) %>%
   ungroup() %>%
-  separate_longer_delim(month, delim = ",")
+  sjmisc::replace_na(contains("IDMC"), value = 0) %>%
+  separate_longer_delim(month, delim = ",") %>%
+  mutate(month = as.numeric(month), .after = year)
+
+# The above is the validated data, but it ends in 2022; this scrapes the latest,
+# unvalidated data (past 180 days). Note that this shows internal displacements
+# (movements) rather than IDPs
+
+# Make sure there aren't multiple pages I should be drawing from!
+idmc_latest_json <- request("https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/?client_id=IDMCWSHSOLO009") %>%
+  req_headers(Accept = "application/json") %>%
+  req_perform() %>%
+  resp_body_json()
+
+idmc_latest_date_spans <- idmc_latest_json %>%
+  map(\(event) as_tibble(discard(event, is.null))) %>%
+  bind_rows() %>%
+  # select(-c(latitude, longitude, centroid, standard_info_text)) %>%
+  select(iso3, displacement_type, qualifier, figure, contains("date")) %>%
+  # filter(displacement_start_date != displacement_end_date) %>%
+  rowwise() %>%
+  mutate(
+    across(contains("date"), ~ as.Date(.x)),
+    date = list(displacement_start_date:displacement_end_date),
+    days = length(date),
+    daily_movements = figure/days) %>%
+  ungroup()
+idmc_latest <- idmc_latest_date_spans %>%
+  unnest(cols = date) %>%
+  mutate(
+    date = as.Date(date),
+    yearmon = as.yearmon(date)) %>%
+    # year = lubridate::year(date),
+    # month = lubridate::month(date)) %>%
+  # Filtering out all months that ended before the data's 180-day window
+  filter(yearmon >= as.yearmon(min(idmc_latest_date_spans$displacement_end_date))) %>%
+  summarize(
+    .by = c(displacement_type, iso3, yearmon),
+    movements = sum(daily_movements)) %>%
+  pivot_wider(names_from = displacement_type, values_from = movements) %>%
+  rename(
+    IDMC_ID_movements_conflict = Conflict,
+    IDMC_ID_movements_disaster = Disaster) %>%
+  complete(iso3, yearmon) %>%
+  sjmisc::replace_na(contains("IDMC"), value = 0) %>%
+  mutate(
+    year = lubridate::year(yearmon),
+    month = lubridate::month(yearmon),
+    IDMC_ID_movemments_combined = IDMC_ID_movements_conflict + IDMC_ID_movements_disaster)
+
+idmc_both <- bind_rows(
+  mutate(idmc, verified = T),
+  mutate(idmc_latest, verified = F))
 
 # Add IMF Social Unrest--------------------------------------------------------
-imf <- read_csv("source-data/rsui_events_by_type.csv") %>%
-  mutate(
-    Date = as.Date(Date, "%m/%d/%Y"),
-    month = lubridate::month(Date)) %>%
-  # In IMF dataset, HKC = "Hong Kong SAR (excl. China results)" and
-  # CHK = "China (excl. Hong Kong SAR results)", while HKG and CHN refer to
-  # Hong Kong and China inclusive of the other; typically, an event in HKC will
-  # also be an event in HKG and CHN;
+most_recent_dir <- read_most_recent(directory_path = "source-data/imf-reported-social-unrest-index",
+  FUN = paste, as_of = Sys.Date())
+rsui_a <- read_csv(file.path(most_recent_dir, "rsui_headline_long.csv"), col_types = cols("D", .default = "d")) %>%
+  filter(year > 1985) %>%
+  mutate(month = lubridate::month(Date), .keep = "unused") %>%
+  pivot_longer(cols = -c(year, month), names_to = "iso3", values_to = "IMF_rsui_a")
+rsui_details <- read_csv(file.path(most_recent_dir, "rsui_event_details.csv"), col_types = "ffDfillllclccl") %>%
+  mutate(month = lubridate::month(Date)) %>%
+  select(
+    iso3 = cty, year, month,
+    IMF_rsui_event = rsui.event,
+    IMF_rsui_criteria_2a = event.2.a,
+    IMF_rsui_criteria_2b = event.2.b,
+    IMF_rsui_criteria_2c = event.2.c,
+    IMF_rsui_criteria_3 = event.3)
+imf_rsui <- full_join(rsui_a, rsui_details, by = c("iso3", "year", "month")) %>%
+  sjmisc::replace_na(matches("criteria|event"), value = FALSE) %>%
   mutate(iso3 = case_when(
-    cty == "KOS" ~ "XKX",
-    cty == "CHK" ~ "CHN",
-    cty == "HKC" ~ "HKG",
-    T ~ cty)) %>%
-  distinct(iso3, Date, Name, .keep_all = T) %>%
-  select(cty.name, iso3, year, month, any.event, major.event) %>%
-  mutate(.keep = "unused",
-    IMF_unrest_event = case_when(any.event ~ 1, T ~ 0),
-    IMF_unrest_event_major = case_when(major.event ~ 1, T ~ 0)) %>%
-  summarize(.by = c("iso3", "year", "month"), across(contains("IMF"), ~ sum(.x))) %>%
-  full_join(
-    filter(starter, iso3 %in% .$iso3),
-    by = c("iso3", "year", "month")) %>%
-  select(-pop) %>%
-  sjmisc::replace_na(contains("IMF"), value = 0)
+    iso3 == "KOS" ~ "XKX",
+    iso3 == "CHK" ~ "CHN",
+    iso3 == "HKC" ~ "HKG",
+    T ~ iso3))
 
 # ADD SPEI --------------------------------------------------------------------
 spei <- read_csv("source-data/df_spei-world_1990-2022.csv") %>%
@@ -701,6 +756,29 @@ spei <- read_csv("source-data/df_spei-world_1990-2022.csv") %>%
 stopifnot("Not all years 2000-2022 appear in dataset" = length(which_not(2000:2022, spei$year)) == 0)
 stopifnot("Not all months appear in dataset" = length(which_not(1:12, spei$month)) == 0)
 spei <- complete(spei, iso3, year, month)
+
+# WBG natural resource rents
+resource_rents_request <- request("http://api.worldbank.org/v2/country/all/indicator/NY.GDP.TOTL.RT.ZS") %>%
+  req_url_query(format = "json") %>%
+  req_headers(Accept = "application/json") %>%
+  req_url_query(per_page = 100)
+
+resource_rents_response <- resource_rents_request %>%
+  req_throttle(10) %>%
+  req_perform_iterative(iterate_with_offset("page"))
+
+WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
+  resp_body_json(i)[[2]] %>%
+    map(\(j) as_tibble(discard(j, is.null)))
+  }) %>%
+  bind_rows() %>% 
+  select(iso3 = countryiso3code, year = date, resource_rents = value) %>%
+  filter(!is.na(resource_rents)) %>%
+  mutate(month = paste(1:12, collapse = ",")) %>%
+  separate_longer_delim(month, delim = ",") %>%
+  mutate(month = as.numeric(month))
+resource_rents %>% summary()
+resource_rents$obs_status %>% unique()
 
 # Combine all relevant datasets together---------------------------------------
 variables <- Reduce(
@@ -740,8 +818,9 @@ variables <- Reduce(
     gii,
     emdat,
     spei,
-    idmc,
-    imf,
+    idmc_both,
+    imf_rsui,
+    WBG_resource_rents,
     income_levels,
     lending_categories_all_iso)) %>%
   arrange(iso3, year, month) %>%
