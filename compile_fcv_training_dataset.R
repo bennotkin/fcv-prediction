@@ -887,7 +887,30 @@ training <- training %>%
     # Remove transformed variables
     select(-ACLED_conflict_related_deaths_change, -ACLED_events_change, -UCDP_BRD_change)
 
+# Add spatially lagged triggers (only includes land neighbors)
+borders <- read_csv("source-data/borders.csv", col_types = "cc")
+neighboring_triggers <- training %>% select(iso3, year, month, contains("trigger")) %>%
+  # tail(n = 6) %>%
+  inner_join(filter(borders, !is.na(border_iso3)), by = "iso3", relationship = "many-to-many") %>%
+  summarize(
+    .by = c(border_iso3, year, month),
+    across(contains("trigger"), .fns = list(
+      list = \(x) paste(iso3[x & !is.na(x)], collapse = ";"),
+      any = any))) %>%
+  rename_with(.cols = contains("trigger"), ~
+    paste0("neighbor_", str_replace(.x, "_any", ""))) %>%
+  rename(iso3 = border_iso3)
+
+training <- training %>%
+  left_join(select(neighboring_triggers, -contains("list")), by = c("iso3", "year", "month")) %>%
+  # select(iso3, year, month, contains('trigger')) %>%
+  mutate(across(contains("neighbor_trigger"), ~
+    case_when(iso3 %ni% neighboring_triggers$iso3 ~ FALSE, T ~ .x)))
+
+# Limit training dataset to low and middle income countries
+training_limited <- training %>%
+  filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3))
+
 # Write FCV_training_dataset.csv
-write_csv(
-  training %>% filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3)),
-  "FCV_training_dataset.csv")
+write_csv(training_limited, "FCV_training_dataset.csv")
+
