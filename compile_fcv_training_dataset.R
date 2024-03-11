@@ -735,11 +735,12 @@ idmc_latest <- idmc_latest_date_spans %>%
   mutate(
     year = lubridate::year(yearmon),
     month = lubridate::month(yearmon),
-    IDMC_ID_movemments_combined = IDMC_ID_movements_conflict + IDMC_ID_movements_disaster)
+    IDMC_ID_movemments_combined = IDMC_ID_movements_conflict + IDMC_ID_movements_disaster) %>%
+  select(-yearmon)
 
 idmc_both <- bind_rows(
-  mutate(idmc, verified = T),
-  mutate(idmc_latest, verified = F))
+  mutate(idmc, IDMC_verified = T),
+  mutate(idmc_latest, IDMC_verified = F))
 
 # Add IMF Social Unrest--------------------------------------------------------
 print("Preparing IMF Reported Social Unrest Index")
@@ -757,7 +758,8 @@ rsui_details <- read_csv(file.path(most_recent_dir, "rsui_event_details.csv"), c
     IMF_rsui_criteria_2a = event.2.a,
     IMF_rsui_criteria_2b = event.2.b,
     IMF_rsui_criteria_2c = event.2.c,
-    IMF_rsui_criteria_3 = event.3)
+    IMF_rsui_criteria_3 = event.3) %>%
+  distinct()
 imf_rsui <- full_join(rsui_a, rsui_details, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(matches("criteria|event"), value = FALSE) %>%
   mutate(iso3 = case_when(
@@ -784,15 +786,16 @@ resource_rents_request <- request("http://api.worldbank.org/v2/country/all/indic
 
 resource_rents_response <- resource_rents_request %>%
   req_throttle(10) %>%
-  req_perform_iterative(iterate_with_offset("page"))
+  req_perform_iterative(iterate_with_offset("page"), max_reqs = 300)
 
 WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
   resp_body_json(i)[[2]] %>%
     map(\(j) as_tibble(discard(j, is.null)))
   }) %>%
   bind_rows() %>% 
-  select(iso3 = countryiso3code, year = date, resource_rents = value) %>%
-  filter(!is.na(resource_rents)) %>%
+  select(iso3 = countryiso3code, year = date, WDI_nat_resource_rents = value) %>%
+  filter(!is.na(WDI_nat_resource_rents)) %>%
+  distinct() %>%
   mutate(month = paste(1:12, collapse = ",")) %>%
   separate_longer_delim(month, delim = ",") %>%
   mutate(month = as.numeric(month))
@@ -801,6 +804,7 @@ resource_rents$obs_status %>% unique()
 
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
+training <- Reduce(
   function(a, b) {
     b <- filter(b, year >= 2000)
     b <- select(b, -any_of("pop"))
@@ -862,6 +866,7 @@ print("Compiling training dataset")
 # Create triggers for FCV------------------------------------------------------
 # Add triggers for FCV risk
 print("Adding triggers")
+training <- training %>%
   mutate(
     # Trigger for total FCV risk
     trigger_total_risk =
@@ -882,6 +887,7 @@ print("Adding triggers")
     # Remove transformed variables
     select(-ACLED_conflict_related_deaths_change, -ACLED_events_change, -UCDP_BRD_change)
 
+# Write FCV_training_dataset.csv
 write_csv(
-  variables %>% filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3)),
+  training %>% filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3)),
   "FCV_training_dataset.csv")
