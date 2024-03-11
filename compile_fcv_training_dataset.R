@@ -34,7 +34,8 @@ get_pop <- function() {
 }
 pop <- get_pop()
 
-# Create starter dataframe with all country-year-months
+# Create starter dataframe with all country-year-months------------------------
+print("Preparing base data frame")
 starter <- country_list %>%
   select(iso3 = Code) %>%
   filter(iso3 != "CHI") %>%
@@ -59,7 +60,8 @@ starter <- country_list %>%
   # Remove months after February 2024
   filter(!(year == 2024 & month > 2))
 
-# Income-levels and lending categories
+# Income-levels and lending categories-----------------------------------------
+print("Preparing income levels")
 income_sheet <- "Country Analytical History"
 # Income classifications are set on July 1, to start each fiscal year. This is
 # when I will begin the month classification. However, the data is based on the
@@ -115,6 +117,8 @@ income_levels <- read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
   select(iso3, year, month,
          WBG_income_level, WBG_income_level_months_stale = income_level_months_stale, ends_with("income"))
 
+# Add lending categories ------------------------------------------------------
+print("Preparing lending categories")
 lending_categories <- read_xlsx("source-data/OGHIST.xlsx",
                               sheet = "Operational Category Change",
                               range = "A10:D519", col_types = "text") %>%
@@ -180,6 +184,7 @@ lending_categories_all_iso <- lending_categories_all_months %>%
   sjmisc::replace_na(starts_with("WBG_lend_cat"), WBG_category_change, value = 0)
 
 # Add ACLED dataset-------------------------------------------------------------
+print("Preparing ACLED")
 if (!file.exists("source-data/acled-processed.csv")) {
   run_acled <- T 
 } else {
@@ -308,6 +313,7 @@ acled_monthly <-
   select(iso3, year, month, pop, everything())
 
 # Add UCDP dataset-------------------------------------------------------------
+print("Preparing UCDP")
 ucdp_geo <- readRDS("source-data/GEDEvent_v23_1.rds")
 # Disaggregate event timespans to daily averages
 ucdp_brd_nested <- ucdp_geo %>%
@@ -345,6 +351,7 @@ ucdp_monthly <- left_join(starter, ucdp_brd, by = c("iso3", "year", "month")) %>
   ungroup()
 
 # Add GIC dataset on coup-related events---------------------------------------
+print("Preparing GIC")
 gic <- read_tsv("http://www.uky.edu/~clthyn2/coup_data/powell_thyne_coups_final.txt",
                 col_types = "cdddddddc") %>%
   filter(year > 1999) %>%
@@ -364,6 +371,7 @@ gic <- left_join(starter, gic, by = c("iso3", "year", "month")) %>%
 #    fromJSON()
 
 # Add REIGN dataset on election inteference------------------------------------
+print("Preparing REIGN")
 reign <- read_csv(
           paste0("https://raw.githubusercontent.com/OEFDataScience/REIGN.github.io/gh-pages/data_sets/REIGN_2021_8.csv"),
           col_types = cols()) %>%
@@ -385,6 +393,7 @@ reign_monthly <- left_join(starter, reign, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(contains("REIGN"), value = 0)
 
 # Add FEWS NET data on Food Insecurity-----------------------------------------
+print("Preparing FEWS")
 # url <- 'https://datacatalogapi.worldbank.org/ddhxext/ResourceView?resource_unique_id=DR0091743'
 # queryString <- list('resource_unique_id' = "DR0091743")
 # response <- VERB("GET", url, query = queryString)
@@ -462,6 +471,7 @@ fews_monthly <- left_join(starter, fews_monthly, by = c("iso3", "year", "month")
 # fpi <- left_join(starter, fpi, by = c("iso3", "year", "month"))
 
 # Add EIU dataset--------------------------------------------------------------
+print("Preparing EIU")
 eiu <- read_csv("source-data/eiu-operational-risk-macroeconomic-2002-2024.csv",
           na = c("", "–", "NA")) %>%
   mutate(iso3 = name2iso(Geography)) %>%
@@ -476,6 +486,7 @@ eiu <- read_csv("source-data/eiu-operational-risk-macroeconomic-2002-2024.csv",
     fill(contains("EIU"))
 
 # Add FSI dataset---------------------------------------------------------------
+print("Preparing FSI")
 # fsi <- read_most_recent('hosted-data/fsi', FUN = read_xlsx, as_of = Sys.Date(), return_date = F)
 fsi_files <- list.files("source-data/fsi-historic", full.names = T)
 fsi_files <- setNames(fsi_files, str_extract(fsi_files, "\\d{4}"))
@@ -504,6 +515,7 @@ fsi_monthly <- left_join(fsi, starter, by = c("iso3", "year"))
 #   separate_longer_delim(month, delim = ",")
 
 # Add CPIA --------------------------------------------------------------------
+print("Preparing CPIA")
 # For API, see https://api.worldbank.org/v2/sources/31/indicators
 # Most recent data, with XLSX and API 
 cpia <- read_xlsx("source-data/CPIA.xlsx", sheet = "Data",
@@ -517,6 +529,7 @@ cpia <- read_xlsx("source-data/CPIA.xlsx", sheet = "Data",
   filter(!is.na(CPIA_IRA))
 
 # Add EM-DAT on natural hazards------------------------------------------------
+print("Preparing EM-DAT")
 emdat_full <- read_xlsx("source-data/EM-DAT.xlsx",
           sheet = 1, range = "A1:AT12835", na = "", col_types = "text")
 emdat <- emdat_full %>%
@@ -587,6 +600,7 @@ emdat <- full_join(emdat_effect, emdat_declarations, by = c("iso3", "year", "mon
 # emdat_monthly %>% summary()
 
 # Add V-DEM--------------------------------------------------------------------
+print("Preparing V-DEM")
 v_dem <- vdemdata::vdem %>%
   as_tibble() %>%
   filter(year >= 2000) %>%
@@ -600,6 +614,7 @@ v_dem <- vdemdata::vdem %>%
   separate_longer_delim(month, delim = ",")
 
 # Add GDP data ----------------------------------------------------------------
+print("Preparing GDP")
 gdp <- read_xls("source-data/GDP per Capita/GDP per capita, PPP (current international $).xls", skip = 3) %>%
   select(-starts_with('1')) %>%
   mutate(across(1:4, ~ as.factor(.x))) %>%
@@ -609,6 +624,7 @@ gdp <- read_xls("source-data/GDP per Capita/GDP per capita, PPP (current interna
   separate_longer_delim(month, delim = ",")
 
 # Add CPI Inflation data ------------------------------------------------------
+print("Preparing CPI")
 cpi <- read_xlsx("source-data/Inflation-data.xlsx",
           sheet = "hcpi_m", range = "R1C1:R189C644") %>%
   # get_col_types_short(cpi, collapse = F) %>% subset(. != "d")
@@ -622,6 +638,7 @@ cpi <- read_xlsx("source-data/Inflation-data.xlsx",
   select(-yearmon)
 
 # Add WBG Worldwide Governance Indicator---------------------------------------
+print("Preparing Worldwide Governance Indicator")
 wgi <- 2:7 %>%
   lapply(function(s) {
     name <- read_xlsx("source-data/wgidataset.xlsx",
@@ -644,6 +661,7 @@ wgi <- 2:7 %>%
   pivot_wider(names_from = "indicator", values_from = "value")
 
 # Add UNDP Gender--------------------------------------------------------------
+print("Preparing UNDP Gender Inequality Index")
 gii <- read_csv("source-data/UNDP_historic dataset (composite, see GII).csv") %>% 
   select(iso3, matches("gii_\\d{4}")) %>%
   pivot_longer(cols = -iso3, names_to = "year", values_to = "UNDP_GII") %>%
@@ -655,6 +673,7 @@ gii <- read_csv("source-data/UNDP_historic dataset (composite, see GII).csv") %>
   separate_longer_delim(month, delim = ",")
 
 # Add IDMC Forced displacement-------------------------------------------------
+print("Preparing IDMC")
 idmc <- read_xlsx("source-data/Displacement (IDMC & UNHCR)/IDMC_Internal_Displacement_Conflict-Violence_Disasters 2008-2022.xlsx") %>%
   select(
     iso3 = ISO3, year = Year,
@@ -723,6 +742,7 @@ idmc_both <- bind_rows(
   mutate(idmc_latest, verified = F))
 
 # Add IMF Social Unrest--------------------------------------------------------
+print("Preparing IMF Reported Social Unrest Index")
 most_recent_dir <- read_most_recent(directory_path = "source-data/imf-reported-social-unrest-index",
   FUN = paste, as_of = Sys.Date())
 rsui_a <- read_csv(file.path(most_recent_dir, "rsui_headline_long.csv"), col_types = cols("D", .default = "d")) %>%
@@ -742,11 +762,10 @@ imf_rsui <- full_join(rsui_a, rsui_details, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(matches("criteria|event"), value = FALSE) %>%
   mutate(iso3 = case_when(
     iso3 == "KOS" ~ "XKX",
-    iso3 == "CHK" ~ "CHN",
-    iso3 == "HKC" ~ "HKG",
     T ~ iso3))
 
 # ADD SPEI --------------------------------------------------------------------
+print("Preparing SPEI")
 spei <- read_csv("source-data/df_spei-world_1990-2022.csv") %>%
   setNames(str_replace_all(names(.), "-+|\\.", "_")) %>%
   mutate(
@@ -781,7 +800,7 @@ resource_rents %>% summary()
 resource_rents$obs_status %>% unique()
 
 # Combine all relevant datasets together---------------------------------------
-variables <- Reduce(
+print("Compiling training dataset")
   function(a, b) {
     b <- filter(b, year >= 2000)
     b <- select(b, -any_of("pop"))
@@ -842,7 +861,7 @@ variables <- Reduce(
 
 # Create triggers for FCV------------------------------------------------------
 # Add triggers for FCV risk
-variables <- variables %>%
+print("Adding triggers")
   mutate(
     # Trigger for total FCV risk
     trigger_total_risk =
