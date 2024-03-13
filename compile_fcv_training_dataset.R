@@ -802,6 +802,25 @@ WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
 resource_rents %>% summary()
 resource_rents$obs_status %>% unique()
 
+# ETH Zurich's Ethnic Power Inequality (ETH)
+# Only available until 2021
+epr_raw <- read_csv("https://icr.ethz.ch/data/epr/core/EPR-2021.csv", col_types = c("ifiicddddfl"))
+epr <- epr_raw %>%
+  filter(to > 1999) %>%
+  summarize(.by = c(gwid, statename, from, to, status), size = sum(size, na.rm = T)) %>%
+  pivot_wider(names_from = status, values_from = size) %>%
+  sjmisc::replace_na(everything(), value = 0) %>%
+  rowwise() %>%
+  mutate(.keep = "unused",
+    iso3 = countrycode(gwid, origin = "gwn", destination = "iso3c", custom_match = c("345" = "SRB", "347" = "XKX", "678" = "YEM", "816" = "VNM")),
+    year = list(from:to)) %>%
+  select(-statename) %>%
+  ungroup() %>%
+  unnest(year) %>%
+  mutate(month = list(1:12)) %>% 
+  unnest(month) %>%
+  rename_with(.cols = -c(iso3, year, month), ~ paste0("EPR_", slugify(.x)))
+
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
 training <- Reduce(
@@ -841,6 +860,7 @@ training <- Reduce(
     gii,
     emdat,
     spei,
+    epr,
     idmc_both,
     imf_rsui,
     WBG_resource_rents,
