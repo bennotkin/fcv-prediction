@@ -939,3 +939,26 @@ training_limited <- training %>%
 # Write FCV_training_dataset.csv
 write_csv(training_limited, "FCV_training_dataset.csv")
 
+# Write/append codebook-variables.csv to be used in codebook
+vars <- names(training)
+if(!file.exists("codebook-variables.csv")) {
+  codebook <- tibble(
+    `Data Source` = str_extract(vars, "^([^_]*)"),
+    `Variable Label` = vars,
+    Definition = "")
+  write_csv(codebook, "codebook-variables.csv")
+} else {
+  codebook <- read_csv("codebook-variables.csv", col_types = "ccc")
+  vars_included <- str_replace_all(codebook$`Variable Label`, c("\\n|;\\s*" = "|", "_…" = ".*"))
+  new_vars <- vars[!str_detect(vars, paste0(vars_included, collapse = "|"))]
+  codebook_addition <- tibble(
+    `Data Source` = str_extract(new_vars, "^([^_]*)"),
+    `Variable Label` = new_vars,
+    Definition = "")
+  codebook <- bind_rows(codebook, codebook_addition)
+  # Arrange codebook alphabetically
+  codebook <- bind_rows(
+    filter(codebook, `Data Source` == "Ad-hoc"),
+    filter(codebook, `Data Source` != "Ad-hoc") %>% arrange(`Variable Label`))
+  write_csv(codebook, "codebook-variables.csv")
+}
