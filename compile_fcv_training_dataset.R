@@ -684,7 +684,7 @@ idmc <- read_xlsx("source-data/Displacement (IDMC & UNHCR)/IDMC_Internal_Displac
   rowwise() %>%
   mutate(
     IDMC_IDPs_combined = sum(IDMC_IDPs_conflict, IDMC_IDPs_disaster, na.rm = T),
-    IDMC_ID_movemments_combined = sum(IDMC_ID_movements_conflict, IDMC_ID_movements_disaster, na.rm = T),
+    IDMC_ID_movements_combined = sum(IDMC_ID_movements_conflict, IDMC_ID_movements_disaster, na.rm = T),
     month = paste(1:12, collapse = ",")) %>%
   ungroup() %>%
   sjmisc::replace_na(contains("IDMC"), value = 0) %>%
@@ -735,7 +735,7 @@ idmc_latest <- idmc_latest_date_spans %>%
   mutate(
     year = lubridate::year(yearmon),
     month = lubridate::month(yearmon),
-    IDMC_ID_movemments_combined = IDMC_ID_movements_conflict + IDMC_ID_movements_disaster) %>%
+    IDMC_ID_movements_combined = IDMC_ID_movements_conflict + IDMC_ID_movements_disaster) %>%
   select(-yearmon)
 
 idmc_both <- bind_rows(
@@ -810,6 +810,7 @@ epr <- epr_raw %>%
   summarize(.by = c(gwid, statename, from, to, status), size = sum(size, na.rm = T)) %>%
   pivot_wider(names_from = status, values_from = size) %>%
   sjmisc::replace_na(everything(), value = 0) %>%
+  mutate(`STATE COLLAPSE` = `STATE COLLAPSE` != 0) %>%
   rowwise() %>%
   mutate(.keep = "unused",
     iso3 = countrycode(gwid, origin = "gwn", destination = "iso3c", custom_match = c("345" = "SRB", "347" = "XKX", "678" = "YEM", "816" = "VNM")),
@@ -817,6 +818,10 @@ epr <- epr_raw %>%
   select(-statename) %>%
   ungroup() %>%
   unnest(year) %>%
+  # !!! Should probably rethink this `distinct()`.
+  # Including because I am coding Yugoslavia 2000-2006 as Serbia, and Serbia 
+  # also has entry 2006-2008
+  distinct(iso3, year, .keep_all = T) %>%
   mutate(month = list(1:12)) %>% 
   unnest(month) %>%
   rename_with(.cols = -c(iso3, year, month), ~ paste0("EPR_", slugify(.x)))
