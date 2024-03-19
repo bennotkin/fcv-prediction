@@ -315,8 +315,13 @@ acled_monthly <-
 # Add UCDP dataset-------------------------------------------------------------
 print("Preparing UCDP")
 ucdp_geo <- readRDS("source-data/GEDEvent_v23_1.rds")
+ucdp_candidate_2023 <- read_csv("https://ucdp.uu.se/downloads/candidateged/GEDEvent_v23_01_23_12.csv",
+  col_types = "dcddcd_dc_dc_dc_dcdcccccdccccddcdcdcddTTddddddddd", col_names = names(ucdp_geo))
+ucdp_candidate_2024 <- read_csv("https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_1.csv",
+  col_types = "dcddcd_dc_dc_dc_dcdcccccdccccddcdcdcddTTddddddddd", col_names = names(ucdp_geo))
+ucdp_all <- bind_rows(ucdp_geo, ucdp_candidate_2023, ucdp_candidate_2024)
 # Disaggregate event timespans to daily averages
-ucdp_brd_nested <- ucdp_geo %>%
+ucdp_brd_nested <- ucdp_all %>%
   filter(year > 1999) %>%
   select(country, country_id, date_start, date_end, deaths = best) %>%
   rowwise() %>%
@@ -779,6 +784,7 @@ stopifnot("Not all months appear in dataset" = length(which_not(1:12, spei$month
 spei <- complete(spei, iso3, year, month)
 
 # WBG natural resource rents
+print("Preparing WBG Resource Rents")
 resource_rents_request <- request("http://api.worldbank.org/v2/country/all/indicator/NY.GDP.TOTL.RT.ZS") %>%
   req_url_query(format = "json") %>%
   req_headers(Accept = "application/json") %>%
@@ -798,12 +804,12 @@ WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
   distinct() %>%
   mutate(month = paste(1:12, collapse = ",")) %>%
   separate_longer_delim(month, delim = ",") %>%
-  mutate(month = as.numeric(month))
-resource_rents %>% summary()
-resource_rents$obs_status %>% unique()
+  mutate(month = as.numeric(month)) %>%
+  filter(iso3 %in% country_list$Code)
 
 # ETH Zurich's Ethnic Power Inequality (ETH)
 # Only available until 2021
+print("Preparing ETH")
 epr_raw <- read_csv("https://icr.ethz.ch/data/epr/core/EPR-2021.csv", col_types = c("ifiicddddfl"))
 epr <- epr_raw %>%
   filter(to > 1999) %>%
