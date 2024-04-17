@@ -8,12 +8,29 @@
 #   Please be aware that source files can be found in the shared Office folder
 #   File locations in the R code should be replaced with relevant local source
 
+# Ask about rerunning
+if (!file.exists("source-data/acled-processed.csv")) {
+  run_acled <- T 
+} else {
+  run_acled <- menu(c("Yes", "No"), title = "Re-download ACLED?") == 1
+}
+if (!file.exists("source-data/cw-pages-list.RDS")) {
+  run_cw <- menu(c("Yes", "No"), title = "No CrisisWatch file. Scraping will take ~3 hours. It is faster to download the RDS file from OneDrive. Proceed to scrape CrisisWatch?") == 1
+} else {
+  run_cw <- menu(c("Yes", "No"), title = "Re-scrape CrisisWatch? (Will take ~3 hours)") == 1
+}
+if (!file.exists("source-data/polecat.csv")) {
+  run_polecat <- T
+} else {
+  run_polecat <- menu(c("Yes", "No"), title = "Reread POLECAT?") == 1
+}
+
 #Load packages------------------------------------------------------------------
 # Install packages from CRAN using librarian
 if (!"librarian" %in% installed.packages()) install.packages("librarian")
 librarian::shelf(
-  "curl", "countrycode", "httr", "httr2", "jsonlite","lubridate", "purrr", "readr",
-  "readxl", "sjmisc", "stringr", "tidyr", "zoo", "dplyr")
+  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools, purrr,
+  readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
 # Install helper functions from GitHub
 source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
 # Install vdemdata package from GitHub
@@ -58,7 +75,7 @@ starter <- country_list %>%
   mutate(year = as.numeric(as.character(year))) %>%
   arrange(year, month, iso3) %>%
   # Remove months after February 2024
-  filter(!(year == 2024 & month > 2))
+  filter(!(year == 2024 & month > 3))
 
 # Income-levels and lending categories-----------------------------------------
 print("Preparing income levels")
@@ -185,11 +202,6 @@ lending_categories_all_iso <- lending_categories_all_months %>%
 
 # Add ACLED dataset-------------------------------------------------------------
 print("Preparing ACLED")
-if (!file.exists("source-data/acled-processed.csv")) {
-  run_acled <- T 
-} else {
-  run_acled <- menu(c("Yes", "No"), title = "Re-download ACLED?") == 1
-}
 
 if (run_acled) {
 # Build API query (will run numerous times until all events are acquired)
@@ -832,6 +844,274 @@ epr <- epr_raw %>%
   unnest(month) %>%
   rename_with(.cols = -c(iso3, year, month), ~ paste0("EPR_", slugify(.x)))
 
+
+# CrisisWatch, from web not PDFs
+print("Preparing CrisisWatch")
+
+if (run_cw) {
+  read_cw_page <- function(page) {
+    country_nodes <- page %>%
+      html_elements("div.c-crisiswatch-entry")
+    outlist <- country_nodes %>% map(\(x) {
+      country_string <- x %>% html_elements("h3") %>% html_text()
+      country_name <- str_replace_all(country_string, c("^[\\s\\n]*" = "", "[\\s\\n]*$" = ""))
+      if (length(country_string) != 1) stop(paste("Wrong number of country names:", country_name, collapse = "; "))
+      entry_month <- x %>% html_elements("time") %>% html_text()
+      last_5_months <- x %>% html_elements(".o-state-entry")
+      months <- last_5_months %>% html_attr("title")
+      states <- 1:5 %>% 
+        map(\(i) html_attr(html_element(last_5_months, glue("a>span:nth-of-type({i})")), "class")) %>%
+        unlist() %>% matrix(ncol = 5) %>% apply(1, \(mo) {paste(na.omit(mo), collapse = ", ")})
+      if (length(states) != length(months)) stop(glue("Length of states and months do not match for {country_name}"))
+      month_states <- tibble(country = country_name, entry_month = entry_month, month = months, status = states)
+      text <- x %>% html_elements(".o-crisis-states__detail") %>%
+        html_elements("p") %>% html_text()
+      return(list(name = country_name, entry_month = entry_month, past5 = month_states, text = text))
+    })
+    return(outlist)
+  }
+
+  page0 <- read_html("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month=1&from_year=1996&to_month=1&to_year=2024&page=0")
+  cw_page0 <- read_cw_page(page0)
+  total_pages <- (page0 %>% html_elements(".o-pagination") %>% html_elements("span") %>% html_text() %>%
+    str_extract("\\d+ of (\\d+)", group = T) %>% na.omit() %>% as.numeric()) - 1
+
+  progress_update <- function(current, total, start_time) { 
+    duration <- Sys.time() - start_time 
+    percentage <- current/total
+    expected_duration <- duration / percentage
+    remaining <- expected_duration - duration
+    end_time <-  start_time + expected_duration
+    print(glue("Reading page {current} of {total}; {round(duration, 2)} {units(duration)} elapsed; {round(remaining, 2)} {units(remaining)} remaining ({end_time})"))
+  }
+
+  start_time <- Sys.time()
+  cw_pages <- vector(mode = "list", length = total_pages + 1)
+  cw_pages[[1]] <- cw_page0
+  for (i in 1:total_pages) {
+      if (i %% 10 == 0) progress_update(i, total_pages, start_time)
+      url <- paste0("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month=1&from_year=1996&to_month=1&to_year=2024&page=", i)
+      page <- read_html(url)
+      cw_pages[[i + 1]] <- read_cw_page(page)
+}
+# saveRDS(cw_pages, "source-data/cw-pages-list.RDS")
+} else {
+  cw_pages <- readRDS("source-data/cw-pages-list.RDS")
+}
+names(cw_pages) <- map(cw_pages, \(x) paste(x$name, x$entry_month, sep = " - ")) %>% unlist()
+
+cw_df <- map(cw_pages, ~ .x$past5) %>%
+  bind_rows() %>%
+  arrange(-row_number()) %>%
+  distinct(pick(-entry_month), .keep_all = T)
+if (any(count(cw_df, country, month)$n > 1)) stop("More than one entry per country-month")
+cw_df <- cw_df %>%
+  mutate(
+    conflict_alert = str_detect(status, "risk-alert"),
+    resolution_opportunity = str_detect(status, "resolution"),
+    status = str_extract(status, "state-(unchanged|deteriorated|improved)") %>%
+      factor(levels = c("state-improved", "state-unchanged", "state-deteriorated")),
+    risk = as.numeric(status) - 2,
+    country = factor(country, levels = sort(unique(country))),
+    iso3 = forcats::fct_relabel(country, \(x) name2iso(x)),
+    across(contains("month"), ~ as.yearmon(.x)),
+    year = lubridate::year(month),
+    month = lubridate::month(month)
+    ) %>%
+  mutate(iso3 = case_when(
+    country == "Northern Ireland (UK)" ~ "GBR",
+    country == "Corsica" ~ "FRA",
+    country == "Nile Waters" ~ "ETH, EGY, SDN",
+    # Need to add countries for 'Central Africa', 'Eastern Mediterranean', 'Gulf and Arabian Peninsula'
+    T ~ iso3)) %>%
+  separate_longer_delim(iso3, ", ")
+
+crisis_watch <- cw_df %>%
+  select(iso3, year, month, CW_risk = risk, CW_alert = conflict_alert, CW_resolution_opportunity = resolution_opportunity) %>%
+  summarize(.by = c(iso3, year, month), across(starts_with("CW"), ~ max(.x, na.rm = T)))
+
+cw_text <- map(cw_pages, \(x) x$text)
+cw_text %>% yaml::write_yaml("crisiswatch-text.yml")
+
+cw_text_df <- cw_pages %>%
+  keep_at(\(x) str_detect(x, "2024|2023")) %>%
+  map(\(x) {
+    tibble(
+      Location = x$name,
+      month = as.yearmon(x$entry_month),
+      text = paste(x$text, collapse = "\n"))
+    }) %>%
+  bind_rows() %>%
+  slice_max(month, by = Location) %>%
+  mutate(iso3 = name2iso(Location)) %>%
+  separate_longer_delim(iso3, delim = ", ") %>%
+  mutate(text = paste(month, text, sep = ": ")) %>%
+  summarize(.by = Location, text = paste(text, collapse = "\n\n"))
+write_csv(cw_text_df, "crisiswatch-text.csv")
+
+# Evacuations
+print("Preparing evacuations")
+# For creating evac-post2015.csv (already done)
+# evac_pdf <- pdf_text("/Users/bennotkin/Downloads/Select Evacuations Through 2024.pdf")
+# rows <- evac_pdf %>%
+#   lapply(\(page) {
+#     page %>% 
+#       str_split_1("\\n") %>%
+#       str_split_fixed("\\s\\s+", n = 10) %>%
+#       as_tibble() %>%
+#       rename(location = 1, action = 2, start_date = 3, length = 4, individuals = 5) %>%
+#       filter(location != "")
+#   }) %>% bind_rows() %>%
+#     filter(action == "Full Emergency Evacuation") %>%
+#     mutate(
+#       country = str_extract(location, "(?<=,\\s).*$"),
+#       iso3 = name2iso(country),
+#       start_date = mdy(start_date),
+#       year = lubridate::year(start_date),
+#       month = lubridate::month(start_date),
+#       evacuation = 1,
+#       .keep = "none"
+#     ) %>% select(-1)
+# write_csv(rows, "source-data/evac-post2015.csv")
+evacuations <- bind_rows(
+  read_csv("source-data/evac-post2015.csv", col_types = "ccddd"),
+  read_csv("source-data/evac-pre2015.csv", col_types = "cddd") %>%
+    mutate(iso3 = name2iso(country))) %>%
+  select(-country) %>%
+  right_join(select(starter, -pop), by = join_by(iso3, year, month)) %>%
+  replace_na(list(evacuation = 0)) %>%
+  rename(WBG_evacuation = evacuation)
+
+# POLECAT
+print("Preparing POLECAT")
+
+# How do we want to aggregate Event Intensity when there are multiple events in a given month?
+# Do we want to treat all involved countries the same (actor, recipient, location)? I currently do.
+
+# Column names
+# Event ID        Primary Actor Sector     Recipient Title        GeoNames ID        
+# Event Date      Actor Sectors            Recipient Name Raw     Raw Placename      
+# Event Type      Actor Title              Wikipedia Recipient ID Feature Type       
+# Event Mode      Actor Name Raw           Placename              Source             
+# Event Intensity Wikipedia Actor ID       City                   Publication Date   
+# Quad Code       Recipient Name           District               Story People       
+# Contexts        Recipient Country        Province               Story Organizations
+# Actor Name      Recipient COW            Country                Story Locations    
+# Actor Country   Primary Recipient Sector Latitude               Language           
+# Actor COW       Recipient Sectors        Longitude              Version  
+
+if (run_polecat) {
+separate_into_involved_countries <- function(df) {
+  df %>%
+    rowwise() %>%
+    mutate(involved_cow = paste(actor_cow, recipient_cow, sep = "; ")) %>%
+    separate_longer_delim(involved_cow, "; ") %>%
+    ungroup() %>%
+    filter(involved_cow != "None") %>%
+    mutate(
+      involved_cow = factor(involved_cow),
+      involved_country_iso = forcats::fct_relabel(involved_cow, \(x) {
+        countrycode(as.numeric(x), origin = "cown", destination = "iso3c",
+                    custom_match = c("260" = "GER", "817" = "VNM"))
+        })) %>%
+    rowwise() %>%
+    mutate(involved_country_iso = paste(country, involved_country_iso, sep = "; ")) %>%
+    ungroup() %>%
+    separate_longer_delim(involved_country_iso, delim = "; ") %>%
+    distinct() %>%
+    filter(involved_country_iso != "NA")
+}
+aggregate_by_country <- function(df) {
+  df %>%
+    mutate(yearmon = as.yearmon(event_date)) %>%
+    summarize(.by = c(yearmon, involved_country_iso),
+      most_negative = min(event_intensity, na.rm = T),
+      median_intensity = median(event_intensity, na.rm = T),
+      intensity_sum = sum(event_intensity, na.rm = T),
+      positive_events_count = sum(event_intensity > 0, na.rm = T),
+      negative_events_count = sum(event_intensity < 0, na.rm = T),
+      material_conflict_count = sum(quad_code == "MATERIAL CONFLICT", na.rm = T),
+      verbal_conflict_count = sum(quad_code == "VERBAL CONFLICT", na.rm = T),
+      verbal_conflict_intensity_sum = sum((quad_code == "VERBAL CONFLICT") * event_intensity))
+}
+
+files <- list.files("source-data/polecat.nosync") %>% str_subset("txt$") %>% str_subset("sDV", negate = T) %>% sort()
+
+pc_headers <- file.path("source-data/polecat.nosync", files) %>%
+  map(\(x) names(read_tsv(x, n_max = 1))) %>%
+  setNames(files)
+pc_headers[1] <- list(setNames(pc_headers[1], "union"))
+header_check <- pc_headers %>%
+  accumulate(\(a, b) {
+    diff <- which_not(a$union, b, both = T)
+    return(list(union = union(a$union, b), diff = diff[lengths(diff) > 0]))
+  })
+header_check %>% map(\(x) x$diff)
+
+pc <- file.path("source-data/polecat.nosync", files) %>%
+  map(\(x) {
+    print(x)
+    df <- rename(read_tsv(x, col_types = cols(.default = "c")), any_of(c(`Event Intensity` = 'Intensity'))) %>%
+      select(-any_of(c("Headline", "Event Text", "Feed", "Story ID")))
+    return(df)
+  }) %>% bind_rows() %>% setNames(slugify(names(.))) %>%
+  select(event_date, quad_code, event_type, event_mode, event_intensity, actor_country, actor_cow, recipient_country, recipient_cow, country) %>%
+  mutate(
+    event_date = as.Date(event_date),
+    event_intensity = as.numeric(event_intensity)
+    )
+
+polecat_2023_24 <-  pc %>%
+  separate_into_involved_countries() %>%
+  aggregate_by_country()
+
+files_archive <- list.files("source-data/polecat.nosync") %>% str_subset("txt$") %>% str_subset("sDV") %>% sort()
+pc_archive <- vector(mode = "list", length = length(files_archive))
+for (i in seq_along(files_archive)) {
+    x <-  file.path("source-data/polecat.nosync", files_archive)[i]
+    print(x)
+    pc_archive[[i]] <- rename(read_tsv(x, col_types = cols(.default = "c")), any_of(c(`Event Intensity` = 'Intensity'))) %>%
+      select(-any_of(c("Headline", "Event Text", "Feed", "Story ID"))) %>%
+      setNames(slugify(names(.))) %>%
+      select(event_date, quad_code, event_type, event_mode, event_intensity, actor_country, actor_cow, recipient_country, recipient_cow, country) %>%
+      mutate(
+        event_date = as.Date(event_date),
+        event_intensity = as.numeric(event_intensity)
+        ) %>%
+      separate_into_involved_countries() %>%
+      aggregate_by_country()
+}
+
+pc_archive_df <- pc_archive %>% bind_rows()
+
+polecat <- bind_rows(pc_archive_df, filter(polecat_2023_24, yearmon >= "Jan 2023")) %>%
+  arrange(yearmon) %>%
+  mutate(involved_country_iso = factor(involved_country_iso)) %>%
+  filter(involved_country_iso != "None") %>%
+  mutate(
+    # .keep = "unused", 
+    .before = 1,
+    iso3 = involved_country_iso,
+    year = lubridate::year(yearmon),
+    month = lubridate::month(yearmon))
+
+write_csv(polecat, "source-data/polecat.csv") 
+} else {
+polecat <- read_csv("source-data/polecat.csv")
+}
+
+pc_firstmonth <- polecat %>% select(yearmon, year, month) %>% slice_min(yearmon, with_ties = F)
+pc_lastmonth <- polecat %>% select(yearmon, year, month) %>% slice_max(yearmon, with_ties = F)
+
+polecat <- polecat %>% right_join(filter(select(starter, -pop), year >= 2018), by = join_by(iso3, year, month)) %>%
+  arrange(year, month, iso3) %>%
+  filter(
+    !(year == pc_firstmonth$year & month < pc_firstmonth$month),
+    !(year == pc_lastmonth$year & month > pc_lastmonth$month)) %>%
+  select(-yearmon) %>%
+  rename_with(.cols = -c(iso3, year, month), ~ paste0("POLECAT_", .x)) %>%
+  sjmisc::replace_na(starts_with("POLECAT"), value = 0)
+
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
 training <- Reduce(
@@ -875,6 +1155,9 @@ training <- Reduce(
     idmc_both,
     imf_rsui,
     WBG_resource_rents,
+    evacuations,
+    polecat,
+    crisis_watch,
     income_levels,
     lending_categories_all_iso)) %>%
   arrange(iso3, year, month) %>%
