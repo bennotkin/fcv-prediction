@@ -8,6 +8,22 @@
 #   Please be aware that source files can be found in the shared Office folder
 #   File locations in the R code should be replaced with relevant local source
 
+
+#Load packages------------------------------------------------------------------
+# Install packages from CRAN using librarian
+if (!"librarian" %in% installed.packages()) install.packages("librarian")
+librarian::shelf(
+  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools, purrr,
+  readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
+# Install helper functions from GitHub
+source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
+# Install vdemdata package from GitHub
+devtools::install_github("vdeminstitute/vdemdata")
+
+# Compile list of countries using iso3 codes-------------------------------------
+country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
+    col_types = cols(.default = "c"))
+
 # Ask about rerunning
 if (!file.exists("source-data/acled-processed.csv")) {
   run_acled <- T 
@@ -24,21 +40,6 @@ if (!file.exists("source-data/polecat.csv")) {
 } else {
   run_polecat <- menu(c("Yes", "No"), title = "Reread POLECAT?") == 1
 }
-
-#Load packages------------------------------------------------------------------
-# Install packages from CRAN using librarian
-if (!"librarian" %in% installed.packages()) install.packages("librarian")
-librarian::shelf(
-  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools, purrr,
-  readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
-# Install helper functions from GitHub
-source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
-# Install vdemdata package from GitHub
-devtools::install_github("vdeminstitute/vdemdata")
-
-# Compile list of countries using iso3 codes-------------------------------------
-country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c"))
   
 # Add population country-level population data sourcd from WBG API--------------
 get_pop <- function() {
@@ -476,7 +477,8 @@ fews_proportions_proj_med <- fews_proportions_proj_med %>%
 fews_monthly <- full_join(fews_proportions, fews_proportions_proj_near, by = c("iso3", "year", "month")) %>%
   full_join(fews_proportions_proj_med, by = c("iso3", "year", "month"))
 fews_monthly <- left_join(starter, fews_monthly, by = c("iso3", "year", "month")) %>%
-  fill(contains("FEWS"))
+  group_by(iso3) %>% fill(contains("FEWS")) %>% ungroup() %>%
+  filter(if_any(contains("FEWS"), ~ !is.na(.x)))
 
 # Add Food Price Inflation dataset---------------------------------------------
 # fpi <- read_csv("source-data/WLD_RTFP_country_2024-01-25.csv") %>%
@@ -844,7 +846,6 @@ epr <- epr_raw %>%
   unnest(month) %>%
   rename_with(.cols = -c(iso3, year, month), ~ paste0("EPR_", slugify(.x)))
 
-
 # CrisisWatch, from web not PDFs
 print("Preparing CrisisWatch")
 
@@ -943,10 +944,10 @@ cw_text_df <- cw_pages %>%
     }) %>%
   bind_rows() %>%
   slice_max(month, by = Location) %>%
-  mutate(iso3 = name2iso(Location)) %>%
+  mutate(iso3 = name2iso(Location), .before = 1) %>%
   separate_longer_delim(iso3, delim = ", ") %>%
   mutate(text = paste(month, text, sep = ": ")) %>%
-  summarize(.by = Location, text = paste(text, collapse = "\n\n"))
+  summarize(.by = c(Location, iso3, month), text = paste(text, collapse = "\n\n"))
 write_csv(cw_text_df, "crisiswatch-text.csv")
 
 # Evacuations
@@ -1093,11 +1094,12 @@ polecat <- bind_rows(pc_archive_df, filter(polecat_2023_24, yearmon >= "Jan 2023
     .before = 1,
     iso3 = involved_country_iso,
     year = lubridate::year(yearmon),
-    month = lubridate::month(yearmon))
+    month = lubridate::month(yearmon)) %>%
+  select(-involved_country_iso)
 
 write_csv(polecat, "source-data/polecat.csv") 
 } else {
-polecat <- read_csv("source-data/polecat.csv")
+polecat <- read_csv("source-data/polecat.csv") %>% select(-any_of("involved_country_iso"))
 }
 
 pc_firstmonth <- polecat %>% select(yearmon, year, month) %>% slice_min(yearmon, with_ties = F)
@@ -1114,8 +1116,7 @@ polecat <- polecat %>% right_join(filter(select(starter, -pop), year >= 2018), b
 
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
-training <- Reduce(
-  function(a, b) {
+left_join_with_checks <- function(a, b) {
     b <- filter(b, year >= 2000)
     b <- select(b, -any_of("pop"))
     # if (typeof(b$iso3) == "character") b$iso3 = factor(b$iso3)
@@ -1128,7 +1129,9 @@ training <- Reduce(
       stop("More than one value per country-month")
     }
     left_join(a, b, by = c("iso3", "year", "month"))
-  },
+}
+training <- Reduce(
+  left_join_with_checks,
   list(
     # Starter data frame of countries, years and months
     starter,
