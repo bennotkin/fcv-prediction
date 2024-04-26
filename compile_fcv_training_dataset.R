@@ -526,12 +526,17 @@ fsi <- fsi_files %>%
 
 fsi_monthly <- left_join(fsi, starter, by = c("iso3", "year"))
 
-# Add INFORM Socioeconomic Vulnerability (Removed)-----------------------------
-# inform <- read_xlsx("/Users/bennotkin/Documents/world-bank/crm/fcv-prediction/INFORM_TREND_2014_2023.xlsx")
-# inform <- filter(inform, str_detect(IndicatorName, "Socio")) %>% 
-#   select(iso3 = Iso3, year = INFORMYear, INFORM_Socio_Vuln = IndicatorScore) %>%
-#   mutate(month = paste(1:12, collapse = ",")) %>%
-#   separate_longer_delim(month, delim = ",")
+# Add INFORM Socioeconomic Vulnerability --------------------------------------
+print("Preparing INFORM")
+# Currently INFORM comes out in September for the following year, so INFORM 2024
+# should be predictive of all months in 2024; I don't know, though, when past datasets
+# were made available, or how edits have been made
+inform <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/inform_risk.csv") %>%
+  select(-c(Flood, Rank, `Lack of Reliability (*)`, `Number of Missing Indicators`, `% of Missing Indicators`, `Countries in HVC`, `Recentness data (average years)`)) %>%
+  mutate(year = INFORM_Year, month = list(1:12)) %>%
+  rename_with(~ paste0("INFORM_", slugify(.x, tolower = F)), .cols = -c(Country, year, month)) %>%
+  select(iso3 = Country, year, month, everything()) %>%
+  unnest(month)
 
 # Add CPIA --------------------------------------------------------------------
 print("Preparing CPIA")
@@ -760,6 +765,8 @@ idmc_latest <- idmc_latest_date_spans %>%
 idmc_both <- bind_rows(
   mutate(idmc, IDMC_verified = T),
   mutate(idmc_latest, IDMC_verified = F))
+
+# See scratchheap.R for plots comparing verified and candidate data
 
 # Add IMF Social Unrest--------------------------------------------------------
 print("Preparing IMF Reported Social Unrest Index")
@@ -1113,7 +1120,60 @@ polecat <- polecat %>% right_join(filter(select(starter, -pop), year >= 2018), b
   select(-yearmon) %>%
   rename_with(.cols = -c(iso3, year, month), ~ paste0("POLECAT_", .x)) %>%
   sjmisc::replace_na(starts_with("POLECAT"), value = 0)
+  
+# POLECAT & ICEWS from Mathijs
+print("Preparing second POLECAT (& ICEWS)")
+polecat2 <- read_csv("source-data/polecat2/ICEWS_and_POLECAT.csv", col_types = c("Dcc", .default = "d")) %>%
+  mutate(iso3 = country_code, year = lubridate::year(date), month = lubridate::month(date), .keep = "unused", .before = 1) %>%
+  select(-country) %>%
+  distinct() %>%
+  filter(iso3 != "DEU") # Removing Germany because it's not in our scope and it has multiple entries
 
+# ICEWS by itself
+# icews <- read_csv("/Users/bennotkin/Downloads/FCV_training_dataset_with_conflictforecast_data_and_icews.csv") %>%
+#   select(iso3, year, month, contains("ICEWS")) %>%
+#   filter(if_any(-c(iso3, year, month), ~ !is.na(.x)))
+# write_csv(icews, "source-data/icews.csv")
+icews <- read_csv("source-data/icews.csv", col_types = "cdddddddddddddddddddddd")
+
+# Conflictforecast.org
+print("Preparing conflictforecast.org")
+cf_dir <- "source-data/conflict-forecast.nosync"
+dir.create(cf_dir)
+# read_most_recent("source-data/conflict-forecast", paste, as_of = Sys.Date(), return_date = T)
+arch_url <- "http://api.backendless.com/C177D0DC-B3D5-818C-FF1E-1CC11BC69600/C5F2917E-C2F6-4F7D-9063-69555274134E/services/fileService/"
+public_urls <- request(arch_url) %>%
+  # req_url_path_append("get-file-listing") %>%
+  req_url_path_append("get-all-directories") %>%
+  # req_method("GET") %>%
+  req_url_query(date = "latest") %>%
+  req_headers(accept = "application/json") %>%
+  req_perform()
+
+public_urls %>% resp_body_json() %>%
+  # This prevents redownloading, which we may actually want
+  discard(\(x) x$name %in% list.files(cf_dir)) %>%
+  map(\(x) {
+    dir <- file.path(cf_dir, x$name)
+    dir.create(dir)
+    resp <- req_perform(request(x$publicUrl))
+    resp_body_json(resp) %>%
+      map(\(y) {
+        curl_download(y$publicUrl, file.path(dir, y$name))
+      })
+    # writeLines(x$updatedOn, file.path(dir, "last-updated"))
+  })
+
+file <- list.files(file.path(cf_dir, "latest"), recursive = T, full.names = T) %>% str_subset("armedconf_12")
+conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
+  mutate(.keep = "unused", .before = 1,
+    iso3 = isocode,
+    yearmon = as.yearmon(as.character(period), format = "%Y%m"),
+    year = lubridate::year(yearmon),
+    month = lubridate::month(yearmon)
+  ) %>%
+  select(iso3, year, month, any_of(paste0("stock_topic_", 0:14)), stock_tokens) %>%
+  rename_with(.cols = contains("stock"), ~ paste0("CONFLICTFORECAST_", .x))
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
 left_join_with_checks <- function(a, b) {
@@ -1146,7 +1206,7 @@ training <- Reduce(
     fsi_monthly,
     cpi,
     eiu,
-    # inform,
+    inform,
     cpia,
     gdp,
     wgi,
@@ -1160,6 +1220,9 @@ training <- Reduce(
     WBG_resource_rents,
     evacuations,
     polecat,
+    polecat2,
+    icews,
+    conflict_forecast,
     crisis_watch,
     income_levels,
     lending_categories_all_iso)) %>%
