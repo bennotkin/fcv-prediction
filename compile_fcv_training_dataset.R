@@ -73,7 +73,9 @@ starter <- country_list %>%
   group_by(iso3) %>%
   fill(pop) %>%
   ungroup() %>%
-  mutate(year = as.numeric(as.character(year))) %>%
+    mutate(.before = year,
+      year = as.numeric(as.character(year)),
+      yearmon = as.yearmon(glue("{year}-{month}"))) %>%
   arrange(year, month, iso3) %>%
   # Remove months after February 2024
   filter(!(year == 2024 & month > 3))
@@ -384,9 +386,70 @@ gic <- left_join(starter, gic, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(contains("GIC"), value = 0)
 
 # Add IFES on elections (API doesn't include interference)---------------------
-# ifes_data <- system(paste0("curl -X GET https://electionguide.org/api/v1/elections_demo/ -H 'Authorization: Token ", readLines(".access/ifes-authorization.txt", warn = F),"'"),
-#    intern = T) %>%
-#    fromJSON()
+lag_multi <- function(x, ns, default = NA, matrix = T, FUN = NULL) {
+  mat <- matrix(unlist(map(ns, \(n) lag(x, n, default = default))), ncol = length(ns), nrow = length(x))
+  if (!matrix) return(mat)
+  apply(mat, 1, c, simplify = F)
+}
+
+lead_multi <- function(x, ns, default = NA, matrix = T, FUN = NULL) {
+  mat <- matrix(unlist(map(ns, \(n) lead(x, n, default = default))), ncol = length(ns), nrow = length(x))
+  if (matrix) return(mat)
+  apply(mat, 1, c, simplify = F)
+}
+
+ifes_data <- system(paste0("curl -X GET https://electionguide.org/api/v2/elections_demo/ -H 'Authorization: Token ", readLines(".access/ifes-authorization.txt", warn = F),"'"),
+   intern = T) %>%
+   fromJSON()
+
+ifes <- ifes_data %>%
+  as_tibble() %>%
+  select(
+    election_id, election_name, #date_updated,
+    district, election_type,
+    election_range_start_date, election_range_end_date,
+    election_declared_start_date, election_declared_end_date,
+    is_snap_election) %>%
+  unnest(c(election_name, district)) %>%
+  select(-district_ocd_id) %>%
+  mutate(
+    # Codes are wrong for Montenegro (MT), Basque Country (BS), and Northern Cyprus (NT)
+    # iso3 = countrycode(district_country, origin = "iso2c", destination = "iso3c"),
+    iso3 = forcats::fct_relabel(district_name, \(x) name2iso(x)),
+    across(contains("date"), as.Date),
+    snap = !is.na(is_snap_election),
+    election_start_date = election_declared_start_date,
+    election_start_date = case_when(is.na(election_start_date) ~ election_range_start_date,
+                                    T ~ election_start_date),
+    election_end_date = election_declared_end_date,
+    election_end_date = case_when(is.na(election_end_date) ~ election_range_end_date,
+                                  T ~ election_end_date),
+    ) %>%
+  select(iso3, district_type, election_start_date, election_end_date, snap, district_type) %>%
+  filter(!is.na(election_start_date) | !is.na(election_end_date)) %>%
+  rowwise() %>%
+  mutate(date = list(election_start_date:election_end_date)) %>%
+  ungroup() %>%
+  unnest(date) %>%
+  mutate(
+    yearmon = as.yearmon(as.Date(date)),
+    year = lubridate::year(yearmon),
+    month = lubridate::month(yearmon),
+    election = T,
+    exec_election = case_when(district_type == "national_exec" ~ T, T ~ F)) %>%
+  distinct(iso3, yearmon, year, month, snap, district_type, election, exec_election)
+
+ifes_monthly <- ifes %>%
+  right_join(select(starter, -pop), by = join_by(iso3, yearmon, year, month)) %>%
+  filter(iso3 %in% unique(ifes$iso3) & between(yearmon, min(ifes$yearmon), max(ifes$yearmon))) %>%
+  arrange(yearmon) %>%
+  replace_na(list(snap = F, election = F, exec_election = F)) %>%
+  mutate(.by = iso3,
+    anticipated = rowAnys(lead_multi(election, 0:6, default = F)),
+    exec_anticipated = rowAnys(lead_multi(exec_election, 0:6, default = F)),
+    snap_anticipated = rowAnys(lead_multi(snap, 0:6, default = F)),
+    exec_snap_anticipated = snap_anticipated & exec_anticipated) %>%
+    rename_with(.cols = -c(iso3, yearmon, year, month), ~ paste0("IFES_", .x))
 
 # Add REIGN dataset on election inteference------------------------------------
 print("Preparing REIGN")
@@ -399,7 +462,7 @@ reign <- read_csv(
     REIGN_irregular_election_anticipated = irreg_lead_ant,
     REIGN_election_anticipated = anticipation) %>%
   filter(year >= 2000) %>%
-  mutate(iso3 = name2iso(country)) %>% 
+  mutate(iso3 = forcats::fct_relabel(factor(country), \(x) name2iso(x))) %>%
   mutate(iso3 = case_when(
     country == "UKG" ~ "GBR",
     country == "Cen African Rep" ~ "CAF",
@@ -1199,8 +1262,9 @@ training <- Reduce(
     acled_monthly,
     ucdp_monthly,
     gic,
-    reign_monthly,
     # Predictor variables
+    reign_monthly,
+    ifes_monthly,
     fews_monthly,
     # fpi,
     fsi_monthly,
