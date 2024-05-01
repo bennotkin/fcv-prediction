@@ -596,10 +596,19 @@ write_fews_csv()
 # Add EIU dataset--------------------------------------------------------------
 print("Preparing EIU")
 write_eiu_csv <- function() {
+  files <- c("source-data/eiu-operational-risk-macroeconomic-2002-2024.csv",
+             "source-data/eiu-political-stability-2002-2024.csv",
+             "source-data/eiu-security-risk-2002-2024.csv")
+  varnames <- c("EIU_macroeconomic_risk", "EIU_political_stability_risk", "EIU_security_risk")
+  read_eiu <- function(file, varname) {
+    df <- read_csv(file, na = c("", "–", "NA")) %>%
   mutate(iso3 = name2iso(Geography)) %>%
   select(iso3, starts_with("2")) %>%
-  pivot_longer(cols = starts_with("20"), names_to = "yearmon", values_to = "EIU_macroeconomic_risk") %>%
-  mutate(
+      pivot_longer(cols = starts_with("20"), names_to = "yearmon", values_to = varname)
+  }
+  eiu <- map2(files, varnames, read_eiu) %>%
+    reduce(\(a, b) full_join(a, b, by = c("iso3", "yearmon"))) %>%
+    mutate(.after = iso3,
     year = as.numeric(str_sub(yearmon, 1, 4)),
     month = as.numeric(str_sub(yearmon, -2, -1))) %>%
   select(-yearmon)
@@ -651,6 +660,93 @@ inform <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inpu
   write_csv(inform, file.path(cm_dir, "inform-risk.csv"))
 }
 write_inform_risk_csv()
+
+inform_severity_collect <- function() {
+  # Method using INFORM Severity's own site; previous method used acaps.org
+  inform_directory <- "source-data/inform-severity"
+
+  if (!dir.exists(inform_directory)) dir.create(inform_directory)  
+  
+  existing_files <- list.files(inform_directory) %>%
+    str_replace("^\\d{8}--", "")
+  existing_files_misnamed <- list.files(inform_directory) %>%
+    subset(!str_detect(., "^\\d{8}"))
+  
+  urls <- read_html("https://drmkc.jrc.ec.europa.eu/inform-index/INFORM-Severity/Results-and-data") %>%
+    html_elements("a") %>%
+    html_attr("href") %>%
+    { .[str_detect(., "xlsx") & !is.na(.)] } %>%
+    { data.frame(url = paste0("https://drmkc.jrc.ec.europa.eu", .))} %>%
+    mutate(
+      file_name = str_extract(url, "[^/]*?.xlsx"),
+      url = str_replace_all(url, " ", "%20")) %>%
+    filter(file_name %ni% existing_files | file_name %in% existing_files_misnamed) %>%
+    .[nrow(.):1,] %>% # Reverses order
+    filter(!is.na(url))
+    
+  if (nrow(urls) > 0) {
+    urls %>% apply(1, function(url) {
+      destfile <- file.path(inform_directory, url["file_name"])
+      curl_download(url["url"], destfile = destfile)
+      if (!str_detect(url["file_name"], "^20\\d{6}")) {
+        # Rename file with YYYYMMDD prefix if it doesn't alreay have one
+        # Using "--" to signal the prefix is not a part of the original file name
+        write_date <- format(as.Date(pull(read_xlsx(destfile, range = "A3", col_names = "date")), format = "%d/%m/%Y"), "%Y%m%d--")
+        file.rename(destfile, file.path(inform_directory, paste0(write_date, url["file_name"])))
+      }
+    })
+  }
+}
+inform_severity_collect()
+
+write_inform_severity_csv <- function() {
+  inform_directory <- "source-data/inform-severity"
+  inform_severity <- list.files(inform_directory) %>%
+    map(\(f) {
+      # yearmonth <- readxl::read_xlsx(file.path(inform_directory, f), sheet = "INFORM Severity - country", range = "A1") %>%
+      #   names() %>% str_extract("[A-Za-z]* \\d{4}$") %>% as.yearmon()
+      date <- as.Date(str_extract(f, "^\\d{8}"), format = "%Y%m%d")
+      column_names <- unlist(readxl::read_xlsx(file.path(inform_directory, f), sheet = "INFORM Severity - country",
+        range = "A2:Z2", col_names = letters)) %>% na.omit()
+      severity <- readxl::read_xlsx(file.path(inform_directory, f), sheet = "INFORM Severity - country",
+        skip = 4, col_names = column_names, na = "x") %>%
+        # select(-c(COUNTRY, `Last updated`)) %>%
+        mutate(.keep = "unused", update = as.Date(`Last updated`)) %>%
+        select(iso3 = ISO3, everything()) %>%
+        rename_with(.cols = -iso3, ~ paste0("INFORMSEVERITY_", slugify(.x))) %>%
+        setNames(str_replace(names(.), "INFORMSEVERITY_inform_severity_", "INFORMSEVERITY_")) %>%
+        mutate(.after = iso3, date = date, yearmon = as.yearmon(date)) %>%
+        filter(if_any(contains("INFORM"), ~ !is.na(.x)))
+      return(severity)
+    }) %>% bind_rows() %>%
+    arrange(iso3, yearmon) %>%
+      mutate(yearmon = factor(yearmon, levels = as.yearmon(seq(as.Date("2020-10-01"), Sys.Date(), by = "month")))) %>%
+      complete(
+        iso3, yearmon, explicit = F,
+        fill = list(INFORMSEVERITY_index = 0, INFORMSEVERITY_crisis = "None")) %>%
+      mutate(.after = iso3, 
+        yearmon = as.yearmon(yearmon),
+        year = lubridate::year(yearmon),
+        month = lubridate::month(yearmon)) %>%
+      arrange(iso3, yearmon) %>%
+      slice_max(by = c(iso3, yearmon), order_by = date, with_ties = F) %>%
+      select(-date)
+  write_csv(inform_severity, file.path(cm_dir, "inform-severity.csv"))
+}
+write_inform_severity_csv()
+
+write_acaps_risklist_csv <- function() {
+  risk_list <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/acaps_risklist.csv") %>%
+    mutate(
+      yearmon = as.yearmon(last_risk_update),
+      risk_level = ordered(risk_level, levels = c(NA, "Low", "Medium", "High"))) %>%
+    summarize(.by = c(iso3, yearmon), risk_level = as.numeric(max(risk_level, na.rm = T))) %>%
+    filter(!is.na(risk_level)) %>%
+    rename_with(.cols = -c(iso3, yearmon), ~ paste0("ACAPS_", .x)) %>%
+    mutate(.after = yearmon, year = lubridate::year(yearmon), month = lubridate::month(yearmon))
+  write_csv(risk_list, file.path(cm_dir, "acaps-risklist.csv"))
+}
+write_acaps_risklist_csv()
 
 # Add CPIA --------------------------------------------------------------------
 print("Preparing CPIA")
@@ -986,7 +1082,7 @@ WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
 }
 write_natural_resource_rents_csv()
 
-# ETH Zurich's Ethnic Power Inequality (ETH)
+# ETH Zurich's Ethnic Power Relations (ETH)
 # Only available until 2021
 print("Preparing ETH")
 write_epr_csv <- function() {
@@ -1356,6 +1452,74 @@ conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
   write_csv(conflict_forecast, file.path(cm_dir, "conflictforecast-org.csv"))
 }
 write_conflictforecast_csv()
+
+# UCDP ViEWS
+print("Preparing ViEWS")
+  write_views_csv <- function() {
+    views_resps <- request("https://api.viewsforecasting.org") %>%
+      req_url_path_append("fatalities002_2024_01_t01") %>%
+      # Level of anaylsis: cm for country-month, pgm for PRIO-GRID-month
+      req_url_path_append("cm") %>% 
+      # Type of violence: sb = state-based; ns = non-state; os = oneosided
+      req_url_path_append("sb") %>%
+      req_url_query(date_start = "2004-01-01") %>%
+
+    # views_req %>%
+
+      # req_headers(Accept = "application/json") %>%
+      # req_perform_iterative(next_req = iterate_with_link_url("page", \(resp) resp_body_json(resp)$next_page))
+      req_perform_iterative(next_req = iterate_with_offset(
+        param_name = "page", resp_pages = \(resp) resp_body_json(resp)$page_count))
+    views <- views_resps %>%
+      resps_data(\(resp) {
+        resp_body_json(resp)$data %>%
+          map(\(d) as_tibble(d))
+        }) %>%
+      bind_rows() %>%
+      select(-c(country_id, month_id, gwcode, name)) %>%
+      rename(iso3 = isoab) %>%
+      rename_with(.cols = -c(iso3, year, month), ~ paste0("VIEWS_", .x))
+  write_csv(views, file.path(cm_dir, "ucdp-views.csv"))
+}
+write_views_csv()
+# BTI Transformation Index
+write_bti_csv <- function() {
+  file <- "source-data/BTI_2006-2024_Scores.xlsx"
+  sheets <- excel_sheets(file) %>% str_subset("old", negate = T)
+  bti_all <- map(sheets, \(s) {
+    readxl::read_xlsx(file, sheet = s, range = "A1:DS138", col_types = "text", na = c("n/a", "-", "?")) %>%
+    mutate(year = str_extract(s, "\\d{4}"))
+    }) %>%
+    bind_rows()
+  bti <- bti_all %>% 
+    select(
+      country = 1, year,
+      status_index = `S | Status Index...4`,
+      status_category = `Category...107`,
+      status_category_text = `...108`,
+      democracy_status = `SI | Democracy Status...5`,
+      economy_status = `SII | Economy Status...29`,
+      governance_index = `G | Governance Index...52`,
+      governance_category = `Category...116`,
+      governance_category_text = `...117`,
+      governance_difficulty = `Q13 | Level of Difficulty...53`,
+      governance_performance = `GII | Governance Performance...121`
+      ) %>%
+    mutate(across(-c(country, contains("text")), ~ as.numeric(.x))) %>%
+    rename_with(.cols = -c(country, year), ~ paste0("BTI_", .x)) %>%
+    mutate(.keep = "unused", .before = 1,
+      iso3 = forcats::fct_relabel(factor(country), \(x) name2iso(x)),
+      year = factor(year, levels = 2006:2024),
+      month = list(1:12)) %>%
+    unnest(month) %>%
+    arrange(iso3, year, month) %>%
+    complete(iso3, year, month) %>%
+    group_by(iso3) %>%
+    fill(starts_with("BTI"))
+  write_csv(bti, file.path(cm_dir, "bti.csv"))
+}
+write_bti_csv()
+
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
 left_join_with_checks <- function(a, b) {
@@ -1383,12 +1547,15 @@ training <- Reduce(
     read_csv(file.path(cm_dir, "gic.csv")),
     # Predictor variables
     read_csv(file.path(cm_dir, "reign.csv")),
+    read_csv(file.path(cm_dir, "ifes.csv")),
     read_csv(file.path(cm_dir, "fews.csv")),
     # fpi,
     read_csv(file.path(cm_dir, "fsi.csv")),
+    read_csv(file.path(cm_dir, "bti.csv")),
     read_csv(file.path(cm_dir, "cpi.csv")),
     read_csv(file.path(cm_dir, "eiu.csv")),
     read_csv(file.path(cm_dir, "inform-risk.csv")),
+    read_csv(file.path(cm_dir, "inform-severity.csv")),
     read_csv(file.path(cm_dir, "cpia.csv")),
     read_csv(file.path(cm_dir, "wbg-gdp.csv")),
     read_csv(file.path(cm_dir, "wgi.csv")),
@@ -1408,6 +1575,9 @@ training <- Reduce(
     read_csv(file.path(cm_dir, "icg-crisiswatch.csv")),
     read_csv(file.path(cm_dir, "wbg-income-levels.csv")),
     read_csv(file.path(cm_dir, "wbg-lending-categories.csv")),
+    read_csv(file.path(cm_dir, "acaps-risklist.csv")),
+    read_csv(file.path(cm_dir, "ucdp-views.csv")),
+    read_csv(file.path(cm_dir, "bti.csv")))) %>%
   arrange(iso3, year, month) %>%
   mutate(iso3 = factor(iso3))
 
