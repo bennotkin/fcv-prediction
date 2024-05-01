@@ -13,8 +13,8 @@
 # Install packages from CRAN using librarian
 if (!"librarian" %in% installed.packages()) install.packages("librarian")
 librarian::shelf(
-  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools, purrr,
-  readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
+  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools,
+  purrr, readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
 # Install helper functions from GitHub
 source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
 # Install vdemdata package from GitHub
@@ -440,16 +440,18 @@ ifes <- ifes_data %>%
   distinct(iso3, yearmon, year, month, snap, district_type, election, exec_election)
 
 ifes_monthly <- ifes %>%
+    select(-district_type) %>%
   right_join(select(starter, -pop), by = join_by(iso3, yearmon, year, month)) %>%
   filter(iso3 %in% unique(ifes$iso3) & between(yearmon, min(ifes$yearmon), max(ifes$yearmon))) %>%
   arrange(yearmon) %>%
   replace_na(list(snap = F, election = F, exec_election = F)) %>%
   mutate(.by = iso3,
-    anticipated = rowAnys(lead_multi(election, 0:6, default = F)),
-    exec_anticipated = rowAnys(lead_multi(exec_election, 0:6, default = F)),
-    snap_anticipated = rowAnys(lead_multi(snap, 0:6, default = F)),
+      anticipated = matrixStats::rowAnys(lead_multi(election, 0:6, default = F)),
+      exec_anticipated = matrixStats::rowAnys(lead_multi(exec_election, 0:6, default = F)),
+      snap_anticipated = matrixStats::rowAnys(lead_multi(snap, 0:6, default = F)),
     exec_snap_anticipated = snap_anticipated & exec_anticipated) %>%
-    rename_with(.cols = -c(iso3, yearmon, year, month), ~ paste0("IFES_", .x))
+    rename_with(.cols = -c(iso3, yearmon, year, month), ~ paste0("IFES_", .x)) %>%
+    summarize(.by = c(iso3, year, month), across(starts_with("IFES_"), ~ max(.x, na.rm = T)))
 
 # Add REIGN dataset on election inteference------------------------------------
 print("Preparing REIGN")
@@ -460,7 +462,8 @@ reign <- read_csv(
     ccode, country, year, month,
     REIGN_delayed_election = delayed,
     REIGN_irregular_election_anticipated = irreg_lead_ant,
-    REIGN_election_anticipated = anticipation) %>%
+    REIGN_election_anticipated = anticipation,
+    REIGN_election_now = election_now) %>%
   filter(year >= 2000) %>%
   mutate(iso3 = forcats::fct_relabel(factor(country), \(x) name2iso(x))) %>%
   mutate(iso3 = case_when(
@@ -583,7 +586,7 @@ fsi <- fsi_files %>%
     return(df)
     }) %>%
   bind_rows() %>%
-  mutate(iso3 = name2iso(Country), .keep = "unused") %>%
+  mutate(iso3 = forcats::fct_relabel(factor(Country), \(x) name2iso(x)), .keep = "unused") %>%
   # Removing West Bank & Gaza because it is lumped in with Israel
   mutate(iso3 = str_replace(iso3, "ISR, PSE", "ISR"))
 
@@ -1241,11 +1244,11 @@ conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
 print("Compiling training dataset")
 left_join_with_checks <- function(a, b) {
     b <- filter(b, year >= 2000)
-    b <- select(b, -any_of("pop"))
+  b <- select(b, -any_of(c("pop", "yearmon")))
     # if (typeof(b$iso3) == "character") b$iso3 = factor(b$iso3)
     if (typeof(b$year) != "double") b$year = as.numeric(b$year)
     if (typeof(b$month) != "double") b$month = as.numeric(b$month)
-    length_check <- count(b, iso3, year, month) %>% filter(n > 1)
+  length_check <- dplyr::count(b, iso3, year, month) %>% filter(n > 1)
     if(nrow(length_check) > 0) {
       print(head(b))
       print(length_check)
