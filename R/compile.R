@@ -169,6 +169,45 @@ training_limited <- training %>%
 # Write FCV_training_dataset.csv
 write_csv(training_limited, "FCV_training_dataset.csv")
 
+# Other spatial lags
+Bnames <- borders_wide$iso3
+B <- as.matrix(borders_wide[,-1])
+rownames(B) <- Bnames
+
+training_limited <- training_limited %>%
+  # head() %>%
+  rowwise() %>%
+  mutate(.before = 3, yearmon = as.yearmon(paste(year, month, sep = "-"))) %>% ungroup()
+slag <- unique(training_limited$yearmon) %>%
+  # .[1] %>%
+  lapply(\(mon) {
+    print(mon)
+    M <- filter(training_limited, yearmon == mon)
+    Mnames <- M$iso3
+    M <- select(M, -where(is.character), -year, -month, -yearmon)
+    M <- mutate(M, across(everything(), ~ as.numeric(.x)))
+    M <- as.matrix(M)
+    rownames(M) <- Mnames
+    BinM <- subset(rownames(B), rownames(B) %in% rownames(M))
+    M <- M[BinM,]
+    # M %>% {apply(1, as.numeric)}
+    # M <- apply(M, 2, as.numeric)
+    # t(M) %>% apply(1, \(i) colMaxs(i * B))
+    maxes <- B %>% apply(1, \(i) matrixStats::colMaxs(i * M, na.rm = T)) %>%
+      t() %>% as_tibble(rownames = "iso3")
+    mins <- B %>% apply(1, \(i) matrixStats::colMins(i * M, na.rm = T)) %>%
+      t() %>% as_tibble(rownames = "iso3")
+    df <- full_join(maxes, mins, by = 'iso3')
+    # if (identical(maxes$iso3, mins$iso3)) df <- bind_cols(maxes, semins)
+    return(df)
+  })
+
+slag_df <- map2(slag, unique(training_limited$yearmon), \(x, y) {
+  mutate(x, year = year(my(y)), month = month(my(y)), .after = iso3)
+}) %>% bind_rows()
+
+write_csv(slag_df, "spatial-lag.csv")
+
 # Write/append codebook-variables.csv to be used in codebook
 vars <- names(training)
 if(!file.exists("codebook-variables.csv")) {
