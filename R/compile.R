@@ -100,8 +100,7 @@ training <- Reduce(
     read_csv(file.path(cm_dir, "wbg-income-levels.csv")),
     read_csv(file.path(cm_dir, "wbg-lending-categories.csv")),
     read_csv(file.path(cm_dir, "acaps-risklist.csv")),
-    read_csv(file.path(cm_dir, "ucdp-views.csv")),
-    read_csv(file.path(cm_dir, "bti.csv")))) %>%
+    read_csv(file.path(cm_dir, "ucdp-views.csv")))) %>%
   arrange(iso3, year, month) %>%
   mutate(iso3 = factor(iso3))
 
@@ -125,14 +124,14 @@ print("Adding triggers")
 training <- training %>%
   mutate(
     # Trigger for total FCV risk
-    trigger_total_risk =
+    TRIGGER_total_risk =
       # (ACLED_conflict_related_deaths > 20 & ACLED_BRD_per_100k > 0.2) |
       (UCDP_BRD > 20 & UCDP_BRD_per_100k > 0.2) |
       (ACLED_events > 25) |
       (GIC_coup_failed | GIC_coup_successful) |
       (REIGN_delayed_election == 1 | REIGN_irregular_election_anticipated == 1),
     # Trigger for change in FCV risk
-    trigger_change_risk =
+    TRIGGER_change_risk =
       # ( ACLED_conflict_related_deaths > 10 &
       #   ACLED_BRD_per_100k > 0.1 &
       #   ACLED_conflict_related_deaths_change > .25) |
@@ -145,22 +144,22 @@ training <- training %>%
 
 # Add spatially lagged triggers (only includes land neighbors)
 borders <- read_csv("source-data/borders.csv", col_types = "cc")
-neighboring_triggers <- training %>% select(iso3, year, month, contains("trigger")) %>%
+neighboring_triggers <- training %>% select(iso3, year, month, contains("TRIGGER")) %>%
   # tail(n = 6) %>%
   inner_join(filter(borders, !is.na(border_iso3)), by = "iso3", relationship = "many-to-many") %>%
   summarize(
     .by = c(border_iso3, year, month),
-    across(contains("trigger"), .fns = list(
+    across(contains("TRIGGER"), .fns = list(
       list = \(x) paste(iso3[x & !is.na(x)], collapse = ";"),
       any = any))) %>%
-  rename_with(.cols = contains("trigger"), ~
-    paste0("neighbor_", str_replace(.x, "_any", ""))) %>%
+  rename_with(.cols = contains("TRIGGER"), ~
+    str_replace_all(.x, c("TRIGGER" = "TRIGGER_neighbor", "_any" = ""))) %>%
   rename(iso3 = border_iso3)
 
 training <- training %>%
   left_join(select(neighboring_triggers, -contains("list")), by = c("iso3", "year", "month")) %>%
-  # select(iso3, year, month, contains('trigger')) %>%
-  mutate(across(contains("neighbor_trigger"), ~
+  # select(iso3, year, month, contains('TRIGGER')) %>%
+  mutate(across(contains("TRIGGER_neighbor"), ~
     case_when(iso3 %ni% neighboring_triggers$iso3 ~ FALSE, T ~ .x)))
 
 # Limit training dataset to low and middle income countries
