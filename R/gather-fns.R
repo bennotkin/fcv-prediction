@@ -1,49 +1,3 @@
-#-------------------------------------------------------------------------------
-#   COMPILING FCV RISK TRAINING DATASET
-#   AUTHORS: BN & LJ
-#   DATE: February 2024
-#-------------------------------------------------------------------------------
-#   Notes: For updated version of the R script use the link below in Github repo
-#   https://github.com/bennotkin/fcv-prediction/blob/main/compile_fcv_training_dataset.R
-#   Please be aware that source files can be found in the shared Office folder
-#   File locations in the R code should be replaced with relevant local source
-
-
-#Load packages------------------------------------------------------------------
-# Install packages from CRAN using librarian
-if (!"librarian" %in% installed.packages()) install.packages("librarian")
-librarian::shelf(
-  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools,
-  purrr, readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
-# Install helper functions from GitHub
-source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
-# Install vdemdata package from GitHub
-devtools::install_github("vdeminstitute/vdemdata")
-
-# Compile list of countries using iso3 codes-------------------------------------
-country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c"))
-
-cm_dir <- "country-month-data"
-if (!dir.exists(cm_dir)) dir.create(cm_dir)
-
-# Ask about rerunning
-if (!file.exists("source-data/acled-processed.csv")) {
-  run_acled <- T 
-} else {
-  run_acled <- menu(c("Yes", "No"), title = "Re-download ACLED?") == 1
-}
-if (!file.exists("source-data/cw-pages-list.RDS")) {
-  run_cw <- menu(c("Yes", "No"), title = "No CrisisWatch file. Scraping will take ~3 hours. It is faster to download the RDS file from OneDrive. Proceed to scrape CrisisWatch?") == 1
-} else {
-  run_cw <- menu(c("Yes", "No"), title = "Re-scrape CrisisWatch? (Will take ~3 hours)") == 1
-}
-if (!file.exists("source-data/polecat.csv")) {
-  run_polecat <- T
-} else {
-  run_polecat <- menu(c("Yes", "No"), title = "Reread POLECAT?") == 1
-}
-  
 # Add population country-level population data sourcd from WBG API--------------
 get_pop <- function() {
   url <- "http://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL"
@@ -53,7 +7,6 @@ get_pop <- function() {
     mutate(iso3 = countryiso3code, pop = value, year = as.numeric(date), .keep = "none")
   return(pop)
 }
-pop <- get_pop()
 
 # Create starter dataframe with all country-year-months------------------------
 print("Preparing base data frame")
@@ -85,138 +38,135 @@ starter <- country_list %>%
   filter(!(year == 2024 & month > 3))
   return(starter)
 }
-starter <- initiate_df()
 
 # Income-levels and lending categories-----------------------------------------
 print("Preparing income levels")
 write_income_csv <- function() {
-income_sheet <- "Country Analytical History"
-# Income classifications are set on July 1, to start each fiscal year. This is
-# when I will begin the month classification. However, the data is based on the
-# previous calendar year's data. E.g., for FY24, classifications changed on 
-# 1 July 2023 based on data from 1 January 2022 to 31 December 2022.
-# Below, I add 1.5 years to the data year to mark the month of the new
-# classification, at the start of the fiscal year.
-income_level_headers <- c(
-  "iso3", "country",
-  unlist(read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
-                   range = "C5:AL6", col_names = T)))
-income_levels <- read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
-                           range = "A12:AL238", col_names = income_level_headers,
-                           col_types = "text", na = "..") %>%
-  filter(!is.na(iso3)) %>%
-  pivot_longer(
-    cols = -c(iso3, country), names_to = "data_year", values_to = "income_level",
-    names_transform = as.numeric) %>%
-  filter(data_year > 1999 & !is.na(income_level)) %>%
-  mutate(
-    iso3 = factor(iso3),
-    income_level = factor(income_level, levels = c("L", "LM", "LM*", "UM", "H"), labels = c("lower_income", "lower_middle_income", "lower_middle_income", "upper_middle_income", "upper_income")),
-    FY = data_year + 2,
-    FY_yearmon = as.yearmon(FY - 0.5),
-    year = lubridate::year(FY_yearmon),
-    month = lubridate::month(FY_yearmon)) %>%
-  # Separate Serbia and Montenegro into two countries; doing so gives the same
-  # income level to both countries for FY92-FY07 (not sure I want to do this,
-  # I should actually be including YUG in the dataset as YUG for relevant years)
-  mutate(iso3 = str_replace(iso3, "^YUG$", "SRB,MNE")) %>%
-  separate_longer_delim(iso3, delim = ",") %>%
-  # Add in all months, with data starting at the start of the fiscal year
-  right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
-  arrange(iso3, year, month) %>%
-  group_by(iso3) %>%
-  mutate(data_year = case_when(is.na(income_level) ~ NA, T ~ data_year)) %>%
-  fill(data_year, FY) %>% ungroup() %>%
-  mutate(.by = c(iso3, FY), no_data = all(is.na(income_level))) %>%
-  group_by(iso3) %>%
-  fill(income_level, .direction = "down") %>% ungroup() %>%
-  filter(!is.na(income_level)) %>%
-  # mutate(income_level = case_when(no_data ~ NA, T ~ income_level)) %>%
-  mutate(income_level_months_stale = 12 * as.numeric(
-          as.yearmon(paste(year, month, sep = "-")) - data_year - 1)) %>%
-  # Replace income_level with ordinal version
-  mutate(
-    WBG_income_level = as.numeric(income_level),
-    # Create separate columns for each income level
-    WBG_lower_income = case_when(WBG_income_level == 1 ~ 1, T ~ 0),
-    WBG_lower_middle_income = case_when(WBG_income_level == 2 ~ 1, T ~ 0),
-    WBG_upper_middle_income = case_when(WBG_income_level == 3 ~ 1, T ~ 0),
-    WBG_upper_income = case_when(WBG_income_level == 4 ~ 1, T ~ 0)) %>%
-  select(iso3, year, month,
-         WBG_income_level, WBG_income_level_months_stale = income_level_months_stale, ends_with("income"))
+  income_sheet <- "Country Analytical History"
+  # Income classifications are set on July 1, to start each fiscal year. This is
+  # when I will begin the month classification. However, the data is based on the
+  # previous calendar year's data. E.g., for FY24, classifications changed on 
+  # 1 July 2023 based on data from 1 January 2022 to 31 December 2022.
+  # Below, I add 1.5 years to the data year to mark the month of the new
+  # classification, at the start of the fiscal year.
+  income_level_headers <- c(
+    "iso3", "country",
+    unlist(read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
+                    range = "C5:AL6", col_names = T)))
+  income_levels <- read_xlsx("source-data/OGHIST.xlsx", sheet = income_sheet,
+                            range = "A12:AL238", col_names = income_level_headers,
+                            col_types = "text", na = "..") %>%
+    filter(!is.na(iso3)) %>%
+    pivot_longer(
+      cols = -c(iso3, country), names_to = "data_year", values_to = "income_level",
+      names_transform = as.numeric) %>%
+    filter(data_year > 1999 & !is.na(income_level)) %>%
+    mutate(
+      iso3 = factor(iso3),
+      income_level = factor(income_level, levels = c("L", "LM", "LM*", "UM", "H"), labels = c("lower_income", "lower_middle_income", "lower_middle_income", "upper_middle_income", "upper_income")),
+      FY = data_year + 2,
+      FY_yearmon = as.yearmon(FY - 0.5),
+      year = lubridate::year(FY_yearmon),
+      month = lubridate::month(FY_yearmon)) %>%
+    # Separate Serbia and Montenegro into two countries; doing so gives the same
+    # income level to both countries for FY92-FY07 (not sure I want to do this,
+    # I should actually be including YUG in the dataset as YUG for relevant years)
+    mutate(iso3 = str_replace(iso3, "^YUG$", "SRB,MNE")) %>%
+    separate_longer_delim(iso3, delim = ",") %>%
+    # Add in all months, with data starting at the start of the fiscal year
+    right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
+    arrange(iso3, year, month) %>%
+    group_by(iso3) %>%
+    mutate(data_year = case_when(is.na(income_level) ~ NA, T ~ data_year)) %>%
+    fill(data_year, FY) %>% ungroup() %>%
+    mutate(.by = c(iso3, FY), no_data = all(is.na(income_level))) %>%
+    group_by(iso3) %>%
+    fill(income_level, .direction = "down") %>% ungroup() %>%
+    filter(!is.na(income_level)) %>%
+    # mutate(income_level = case_when(no_data ~ NA, T ~ income_level)) %>%
+    mutate(income_level_months_stale = 12 * as.numeric(
+            as.yearmon(paste(year, month, sep = "-")) - data_year - 1)) %>%
+    # Replace income_level with ordinal version
+    mutate(
+      WBG_income_level = as.numeric(income_level),
+      # Create separate columns for each income level
+      WBG_lower_income = case_when(WBG_income_level == 1 ~ 1, T ~ 0),
+      WBG_lower_middle_income = case_when(WBG_income_level == 2 ~ 1, T ~ 0),
+      WBG_upper_middle_income = case_when(WBG_income_level == 3 ~ 1, T ~ 0),
+      WBG_upper_income = case_when(WBG_income_level == 4 ~ 1, T ~ 0)) %>%
+    select(iso3, year, month,
+          WBG_income_level, WBG_income_level_months_stale = income_level_months_stale, ends_with("income"))
   write_csv(income_levels, file.path(cm_dir, "wbg-income-levels.csv"))
 }
-write_income_csv()
 
 # Add lending categories ------------------------------------------------------
 print("Preparing lending categories")
 write_lending_csv <- function() {
-lending_categories <- read_xlsx("source-data/OGHIST.xlsx",
-                              sheet = "Operational Category Change",
-                              range = "A10:D519", col_types = "text") %>%
-  filter(!is.na(`Fiscal year`)) %>%
-  mutate(
-    FY = case_when(
-      str_sub(`Fiscal year`, 3, 3) > 3 ~ str_replace(`Fiscal year`, "FY", "19"),
-      str_sub(`Fiscal year`, 3, 3) < 3 ~ str_replace(`Fiscal year`, "FY", "20")),
-    FY = as.numeric(FY),
-    # yearmon = as.yearmon(FY - 0.5),
-    iso3 = name2iso(Country),
-    iso3 = case_when(
-      Country == "Czechoslovakia" ~ "CZE, SVK",
-      T ~ iso3)) %>%
-  separate_longer_delim(iso3, delim = ", ")
-initial_categories <- lending_categories %>%
-  slice_min(by = Country, order_by = FY) %>%
-  select(iso3, category = From) %>%
-  mutate(FY = 1979) 
-category_changes <- lending_categories %>%
-  select(iso3, FY, category = To)
-lending_categories <- bind_rows(initial_categories, category_changes) %>%
-# The documents classifications change in 2009: "Beginning in FY09, the number
-# of IBRD levels are reduced in accordance with the Memorandum to the Executive
-# Directors dated January 17, 2008 (R2008-0007). Level II becomes the effective
-# IDA eligibility threshold with the historic IDA eligibility threshold footnoted;
-# Level III is described as "IBRD terms"; Level IV becomes "IBRD Graduation". As
-# a result, categories are not strictly comparable to those used in previous years.			
-  mutate(
-    WBG_lending_category = as.numeric(case_when(
-      FY < 2009 ~ str_replace_all(category, c(
-                    "^I$" = "1", "^II$" = "2", "^III|IV$" = "3", "^V$" = "4")),
-      FY >= 2009 ~ str_replace_all(category, c(
-              "^I$" = "1", "^II$" = "2", "^III$" = "3", "^IV$" = "4")))))
-all_months <- tibble(
-  year = factor(1978, levels = 1978:2024),
-  month = factor(1, levels = 1:12),
-  iso3 = factor("CHL", levels = unique(lending_categories$iso3))) %>%
-  complete(year, month, iso3) %>%
-  mutate(across(c(year, month), ~ as.numeric(as.character(.x))))
-lending_categories_all_months <- lending_categories %>%
-  filter(!is.na(WBG_lending_category)) %>%
-  mutate(
-    yearmon = as.yearmon(FY - 0.5),
-    year = lubridate::year(yearmon),
-    month = lubridate::month(yearmon)) %>%
-  full_join(all_months, by = c("iso3", "year", "month")) %>%
-  arrange(iso3, year, month) %>%
-  group_by(iso3) %>%
-  fill(WBG_lending_category) %>%
-  ungroup() %>%
-  mutate(
-    # Create separate columns for each lending category
-    WBG_lend_cat_civil_works = case_when(WBG_lending_category == 1 ~ 1, T ~ 0),
-    WBG_lend_cat_ida = case_when(WBG_lending_category == 2 ~ 1, T ~ 0),
-    WBG_lend_cat_ibrd = case_when(WBG_lending_category == 3 ~ 1, T ~ 0),
-    WBG_lend_cat_ibrd_grad = case_when(WBG_lending_category == 4 ~ 1, T ~ 0)) %>%
-  select(iso3, year, month, starts_with("WBG_")) %>%
-  mutate(.by = iso3, WBG_category_change = WBG_lending_category - lag(WBG_lending_category)) %>%
-  filter(year > 1999 & !is.na(WBG_lending_category))
-lending_categories_all_iso <- lending_categories_all_months %>%
-  right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
-  sjmisc::replace_na(starts_with("WBG_lend_cat"), WBG_category_change, value = 0)
+  lending_categories <- read_xlsx("source-data/OGHIST.xlsx",
+                                sheet = "Operational Category Change",
+                                range = "A10:D519", col_types = "text") %>%
+    filter(!is.na(`Fiscal year`)) %>%
+    mutate(
+      FY = case_when(
+        str_sub(`Fiscal year`, 3, 3) > 3 ~ str_replace(`Fiscal year`, "FY", "19"),
+        str_sub(`Fiscal year`, 3, 3) < 3 ~ str_replace(`Fiscal year`, "FY", "20")),
+      FY = as.numeric(FY),
+      # yearmon = as.yearmon(FY - 0.5),
+      iso3 = name2iso(Country),
+      iso3 = case_when(
+        Country == "Czechoslovakia" ~ "CZE, SVK",
+        T ~ iso3)) %>%
+    separate_longer_delim(iso3, delim = ", ")
+  initial_categories <- lending_categories %>%
+    slice_min(by = Country, order_by = FY) %>%
+    select(iso3, category = From) %>%
+    mutate(FY = 1979) 
+  category_changes <- lending_categories %>%
+    select(iso3, FY, category = To)
+  lending_categories <- bind_rows(initial_categories, category_changes) %>%
+  # The documents classifications change in 2009: "Beginning in FY09, the number
+  # of IBRD levels are reduced in accordance with the Memorandum to the Executive
+  # Directors dated January 17, 2008 (R2008-0007). Level II becomes the effective
+  # IDA eligibility threshold with the historic IDA eligibility threshold footnoted;
+  # Level III is described as "IBRD terms"; Level IV becomes "IBRD Graduation". As
+  # a result, categories are not strictly comparable to those used in previous years.			
+    mutate(
+      WBG_lending_category = as.numeric(case_when(
+        FY < 2009 ~ str_replace_all(category, c(
+                      "^I$" = "1", "^II$" = "2", "^III|IV$" = "3", "^V$" = "4")),
+        FY >= 2009 ~ str_replace_all(category, c(
+                "^I$" = "1", "^II$" = "2", "^III$" = "3", "^IV$" = "4")))))
+  all_months <- tibble(
+    year = factor(1978, levels = 1978:2024),
+    month = factor(1, levels = 1:12),
+    iso3 = factor("CHL", levels = unique(lending_categories$iso3))) %>%
+    complete(year, month, iso3) %>%
+    mutate(across(c(year, month), ~ as.numeric(as.character(.x))))
+  lending_categories_all_months <- lending_categories %>%
+    filter(!is.na(WBG_lending_category)) %>%
+    mutate(
+      yearmon = as.yearmon(FY - 0.5),
+      year = lubridate::year(yearmon),
+      month = lubridate::month(yearmon)) %>%
+    full_join(all_months, by = c("iso3", "year", "month")) %>%
+    arrange(iso3, year, month) %>%
+    group_by(iso3) %>%
+    fill(WBG_lending_category) %>%
+    ungroup() %>%
+    mutate(
+      # Create separate columns for each lending category
+      WBG_lend_cat_civil_works = case_when(WBG_lending_category == 1 ~ 1, T ~ 0),
+      WBG_lend_cat_ida = case_when(WBG_lending_category == 2 ~ 1, T ~ 0),
+      WBG_lend_cat_ibrd = case_when(WBG_lending_category == 3 ~ 1, T ~ 0),
+      WBG_lend_cat_ibrd_grad = case_when(WBG_lending_category == 4 ~ 1, T ~ 0)) %>%
+    select(iso3, year, month, starts_with("WBG_")) %>%
+    mutate(.by = iso3, WBG_category_change = WBG_lending_category - lag(WBG_lending_category)) %>%
+    filter(year > 1999 & !is.na(WBG_lending_category))
+  lending_categories_all_iso <- lending_categories_all_months %>%
+    right_join(select(starter, -pop), by = c("iso3", "year", "month")) %>%
+    sjmisc::replace_na(starts_with("WBG_lend_cat"), WBG_category_change, value = 0)
   write_csv(lending_categories_all_iso, file.path(cm_dir, "wbg-lending-categories.csv"))
 }
-write_lending_csv()
 
 # Add ACLED dataset-------------------------------------------------------------
 print("Preparing ACLED")
@@ -343,7 +293,6 @@ acled_monthly <-
   select(iso3, year, month, pop, everything())
   write_csv(acled_monthly, file.path(cm_dir, "acled.csv"))
 }
-write_acled_csv()
 
 # Add UCDP dataset-------------------------------------------------------------
 print("Preparing UCDP")
@@ -390,7 +339,6 @@ ucdp_monthly <- left_join(starter, ucdp_brd, by = c("iso3", "year", "month")) %>
   ungroup()
   write_csv(ucdp_monthly, file.path(cm_dir, "ucdp.csv"))
   }
-  write_ucdp_csv()
 
 # Add GIC dataset on coup-related events---------------------------------------
 print("Preparing GIC")
@@ -481,7 +429,16 @@ ifes_monthly <- ifes %>%
     summarize(.by = c(iso3, year, month), across(starts_with("IFES_"), ~ max(.x, na.rm = T)))
   write_csv(ifes_monthly, file.path(cm_dir, "ifes.csv"))
 }
-write_ifes_csv()
+
+inner_join(reign, ifes_monthly) %>%
+  dplyr::count(REIGN_election_now, IFES_election)
+  # { cor(x = .$REIGN_election_anticipated, y = .$IFES_anticipated) }
+  # { cor(x = .$REIGN_election_anticipated, y = .$IFES_exec_anticipated) }
+  # { cor(x = .$REIGN_irregular_election_anticipated, y = .$IFES_snap_anticipated) }
+
+#   pivot_wider(names_from = district_type, values_from = )
+
+# ifes %>% filter(election_declared_start_date != election_range_start_date)
 
 # Add REIGN dataset on election inteference------------------------------------
 print("Preparing REIGN")
@@ -508,7 +465,6 @@ reign_monthly <- left_join(starter, reign, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(contains("REIGN"), value = 0)
   write_csv(reign_monthly, file.path(cm_dir, "reign.csv"))
 }
-write_reign_csv()
 
 # Add FEWS NET data on Food Insecurity-----------------------------------------
 print("Preparing FEWS")
@@ -582,7 +538,6 @@ fews_monthly <- left_join(starter, fews_monthly, by = c("iso3", "year", "month")
   filter(if_any(contains("FEWS"), ~ !is.na(.x)))
   write_csv(fews_monthly, file.path(cm_dir, "fews.csv"))
 }
-write_fews_csv()
 
 # Add Food Price Inflation dataset---------------------------------------------
 # fpi <- read_csv("source-data/WLD_RTFP_country_2024-01-25.csv") %>%
@@ -617,7 +572,6 @@ write_eiu_csv <- function() {
     fill(contains("EIU"))
   write_csv(eiu, file.path(cm_dir, "eiu.csv"))
 }
-write_eiu_csv()
 
 # Add FSI dataset---------------------------------------------------------------
 print("Preparing FSI")
@@ -643,7 +597,6 @@ fsi <- fsi_files %>%
 fsi_monthly <- left_join(fsi, starter, by = c("iso3", "year"))
   write_csv(fsi_monthly, file.path(cm_dir, "fsi.csv"))
 }
-write_fsi_csv()
 
 # Add INFORM Socioeconomic Vulnerability --------------------------------------
 print("Preparing INFORM")
@@ -659,7 +612,6 @@ inform <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inpu
   unnest(month)
   write_csv(inform, file.path(cm_dir, "inform-risk.csv"))
 }
-write_inform_risk_csv()
 
 inform_severity_collect <- function() {
   # Method using INFORM Severity's own site; previous method used acaps.org
@@ -733,7 +685,6 @@ write_inform_severity_csv <- function() {
       select(-date)
   write_csv(inform_severity, file.path(cm_dir, "inform-severity.csv"))
 }
-write_inform_severity_csv()
 
 write_acaps_risklist_csv <- function() {
   risk_list <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/acaps_risklist.csv") %>%
@@ -746,7 +697,6 @@ write_acaps_risklist_csv <- function() {
     mutate(.after = yearmon, year = lubridate::year(yearmon), month = lubridate::month(yearmon))
   write_csv(risk_list, file.path(cm_dir, "acaps-risklist.csv"))
 }
-write_acaps_risklist_csv()
 
 # Add CPIA --------------------------------------------------------------------
 print("Preparing CPIA")
@@ -764,7 +714,6 @@ cpia <- read_xlsx("source-data/CPIA.xlsx", sheet = "Data",
   filter(!is.na(CPIA_IRA))
   write_csv(cpia, file.path(cm_dir, "cpia.csv"))
 }
-write_cpia_csv()
 
 # Add EM-DAT on natural hazards------------------------------------------------
 print("Preparing EM-DAT")
@@ -839,7 +788,6 @@ emdat <- full_join(emdat_effect, emdat_declarations, by = c("iso3", "year", "mon
 # emdat_monthly %>% summary()
   write_csv(emdat, file.path(cm_dir, "emdat.csv"))
 }
-write_emdat_csv()
 
 # Add V-DEM--------------------------------------------------------------------
 print("Preparing V-DEM")
@@ -857,7 +805,6 @@ v_dem <- vdemdata::vdem %>%
   separate_longer_delim(month, delim = ",")
   write_csv(v_dem, file.path(cm_dir, "vdem.csv"))
 }
-write_vdem_csv()
 
 # Add GDP data ----------------------------------------------------------------
 print("Preparing GDP")
@@ -871,7 +818,6 @@ gdp <- read_xls("source-data/GDP per Capita/GDP per capita, PPP (current interna
   separate_longer_delim(month, delim = ",")
   write_csv(gdp, file.path(cm_dir, "wbg-gdp.csv"))
 }
-write_gdp_csv()
 
 # Add CPI Inflation data ------------------------------------------------------
 print("Preparing CPI")
@@ -889,7 +835,6 @@ cpi <- read_xlsx("source-data/Inflation-data.xlsx",
   select(-yearmon)
   write_csv(cpi, file.path(cm_dir, "cpi.csv"))
 }
-write_cpi_csv()
 
 # Add WBG Worldwide Governance Indicator---------------------------------------
 print("Preparing Worldwide Governance Indicator")
@@ -916,7 +861,6 @@ wgi <- 2:7 %>%
   pivot_wider(names_from = "indicator", values_from = "value")
   write_csv(wgi, file.path(cm_dir, "wgi.csv"))
 }
-write_wgi_csv()
 
 # Add UNDP Gender--------------------------------------------------------------
 print("Preparing UNDP Gender Inequality Index")
@@ -932,7 +876,6 @@ gii <- read_csv("source-data/UNDP_historic dataset (composite, see GII).csv") %>
   separate_longer_delim(month, delim = ",")
   write_csv(gii, file.path(cm_dir, "undp-gii.csv"))
 }
-write_gender_inequality_csv()
 
 # Add IDMC Forced displacement-------------------------------------------------
 print("Preparing IDMC")
@@ -1006,7 +949,6 @@ idmc_both <- bind_rows(
   mutate(idmc_latest, IDMC_verified = F))
   write_csv(idmc_both, file.path(cm_dir, "idmc.csv"))
 }
-write_idmc_csv()
 
 # See scratchheap.R for plots comparing verified and candidate data
 
@@ -1033,10 +975,12 @@ imf_rsui <- full_join(rsui_a, rsui_details, by = c("iso3", "year", "month")) %>%
   sjmisc::replace_na(matches("criteria|event"), value = FALSE) %>%
   mutate(iso3 = case_when(
     iso3 == "KOS" ~ "XKX",
+    # Causing duplicates, need to think through
+    #   iso3 == "CHK" ~ "CHN",
+    #   iso3 == "HKC" ~ "HKG",
     T ~ iso3))
   write_csv(imf_rsui, file.path(cm_dir, "imf-rsui.csv"))
 }
-write_imf_rsui_csv()
 
 # ADD SPEI --------------------------------------------------------------------
 print("Preparing SPEI")
@@ -1052,7 +996,6 @@ stopifnot("Not all months appear in dataset" = length(which_not(1:12, spei$month
 spei <- complete(spei, iso3, year, month)
   write_csv(spei, file.path(cm_dir, "spei.csv"))
 }
-write_spei_csv()
 
 # WBG natural resource rents
 print("Preparing WBG Resource Rents")
@@ -1080,7 +1023,6 @@ WBG_resource_rents <- resps_data(resource_rents_response, \(i) {
   filter(iso3 %in% country_list$Code)
   write_csv(WBG_resource_rents, file.path(cm_dir, "wbg-resource-rents.csv"))
 }
-write_natural_resource_rents_csv()
 
 # ETH Zurich's Ethnic Power Relations (ETH)
 # Only available until 2021
@@ -1109,7 +1051,6 @@ epr <- epr_raw %>%
   rename_with(.cols = -c(iso3, year, month), ~ paste0("EPR_", slugify(.x)))
   write_csv(epr, file.path(cm_dir, "eth-epr.csv"))
 }
-write_epr_csv()
 
 # CrisisWatch, from web not PDFs
 print("Preparing CrisisWatch")
@@ -1125,6 +1066,7 @@ if (run_cw) {
       entry_month <- x %>% html_elements("time") %>% html_text()
       last_5_months <- x %>% html_elements(".o-state-entry")
       months <- last_5_months %>% html_attr("title")
+        # states <- last_5_months %>% html_element("a>span:first-of-type") %>% html_attr("class")
       states <- 1:5 %>% 
         map(\(i) html_attr(html_element(last_5_months, glue("a>span:nth-of-type({i})")), "class")) %>%
         unlist() %>% matrix(ncol = 5) %>% apply(1, \(mo) {paste(na.omit(mo), collapse = ", ")})
@@ -1216,8 +1158,36 @@ cw_text_df <- cw_pages %>%
 write_csv(cw_text_df, "crisiswatch-text.csv")
   write_csv(crisis_watch, file.path(cm_dir, "icg-crisiswatch.csv"))
 }
-write_crisiswatch_csv()
 
+# country_regex <- codelist$country.name.en.regex %>% {paste0("(", ., ")")} %>% paste(collapse = "|")
+
+# Believe this is for finding the countries being described in multi-country listings, such as "Nile Waters"
+# This doesn't work with multi-word country names
+identify_country_groups <- function(country_group) {
+  cw_text %>% keep_at(\(x) str_detect(x, country_group)) %>%
+    unlist() %>% 
+    str_split(boundary("word")) %>% unlist() %>%
+    str_subset("^[A-Z]") %>%
+    # str_split(" (?=[a-z])") %>%
+    str_c(collapse = " ") %>%
+    tolower() %>%
+    head() %>%
+    str_match_all(country_regex) %>%
+    # str_match(codelist$country.name.en.regex) %>% 
+    .[[1]] %>% . [!is.na(.[,1]),]
+    unlist() %>%
+    head()
+    tibble(text = .) %>%
+    count(text) %>%
+    mutate(iso = name2iso(text)) %>%
+    arrange(desc(n)) #%>%
+    # { setNames(.$iso, .$n) }
+    # head() %>%
+    # dim()
+    # (\(mat) {colnames(mat) <- codelist$country.name.en; return(mat)})()
+    # setNames(codelist$country.name.en.regex)
+}
+# identify_country_groups("Nile Waters")
 
 # Evacuations
 print("Preparing evacuations")
@@ -1254,7 +1224,6 @@ evacuations <- bind_rows(
   rename(WBG_evacuation = evacuation)
   write_csv(evacuations, file.path(cm_dir, "wbg-evacuations.csv"))
 }
-write_evacuations_csv()
 
 # POLECAT
 print("Preparing POLECAT")
@@ -1388,7 +1357,7 @@ pc_lastmonth <- polecat %>% select(yearmon, year, month) %>% slice_max(yearmon, 
   sjmisc::replace_na(starts_with("POLECAT"), value = 0)
   write_csv(polecat, file.path(cm_dir, "polecat.csv"))
 }
-write_polecat_csv()
+
   
 # POLECAT & ICEWS from Mathijs
 print("Preparing second POLECAT (& ICEWS)")
@@ -1408,7 +1377,6 @@ polecat2 <- read_csv("source-data/polecat2/ICEWS_and_POLECAT.csv", col_types = c
   # icews <- read_csv("source-data/icews.csv", col_types = "cdddddddddddddddddddddd")
   write_csv(icews, file.path(cm_dir, "icews.csv"))
 }
-write_polecat_icews_csv()
 
 # Conflictforecast.org
 print("Preparing conflictforecast.org")
@@ -1425,6 +1393,8 @@ public_urls <- request(arch_url) %>%
   req_headers(accept = "application/json") %>%
   req_perform()
 
+  # latest_month <- max(as.yearmon(list.files("source-data/conflict-forecast.nosync"), format = "%m-%Y"))
+
 public_urls %>% resp_body_json() %>%
   # This prevents redownloading, which we may actually want
   discard(\(x) x$name %in% list.files(cf_dir)) %>%
@@ -1439,6 +1409,35 @@ public_urls %>% resp_body_json() %>%
     # writeLines(x$updatedOn, file.path(dir, "last-updated"))
   })
 
+    # # WARNING Need to replace old names with new names, but it depends on which file I'm reading
+    # new_names <- c(
+    #         "period" = "year-month",
+    #         "fatalities_ucdp" = "best",
+    #         "population" = "populationwb",
+    #         "ons_anyviolence_03_target" = "ons_anyviolence3", 
+    #         "ons_anyviolence_03_text" = "text_model",
+    #         "ons_anyviolence_03_all" = "best_model",
+    #         "ons_anyviolence_12_target" = "ons_anyviolence12",
+    #         "ons_anyviolence_12_text" = "text_model",
+    #         "ons_anyviolence_12_all" = "best_model",
+    #         "ons_armedconf_03_target" = "ons_armedconf3",
+            
+    #         )
+
+  # Reads all past files
+    # armed_conflict_12 <- list.files(cf_dir, recursive = T) %>% str_subset("armedconf_12") %>%
+    #   file.path(cf_dir, .) %>%
+    #   .[1:3] %>%
+    #   map(\(file) {
+    #     read_csv(file, col_types = c("f", .default = "c")) #%>%
+    #       # rename(any_of(new_names))
+    #     }) %>%
+    #   reduce(\(a, b) {
+    #     print(glue("Missing columns: {setdiff(names(a), names(b))}", collapse = ", "))
+    #     # print(glue("New columns: {setdiff(names(b), names(a))}", collapse = ", "))
+    #     bind_rows(a, b)
+    #   })
+
 file <- list.files(file.path(cf_dir, "latest"), recursive = T, full.names = T) %>% str_subset("armedconf_12")
 conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
   mutate(.keep = "unused", .before = 1,
@@ -1451,7 +1450,10 @@ conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
   rename_with(.cols = contains("stock"), ~ paste0("CONFLICTFORECAST_", .x))
   write_csv(conflict_forecast, file.path(cm_dir, "conflictforecast-org.csv"))
 }
-write_conflictforecast_csv()
+
+mathijs <- read_csv("/Users/bennotkin/Downloads/FCV_training_dataset_with_conflictforecast_data_and_icews.csv")
+waldo::compare(head(training_limited), head(mathijs))
+which_not(names(training_limited), names(mathijs), both = T)
 
 # UCDP ViEWS
 print("Preparing ViEWS")
@@ -1481,7 +1483,136 @@ print("Preparing ViEWS")
       rename_with(.cols = -c(iso3, year, month), ~ paste0("VIEWS_", .x))
   write_csv(views, file.path(cm_dir, "ucdp-views.csv"))
 }
-write_views_csv()
+
+write_acled_cast_csv <- function() {
+  # No more World Bank downloads until next year
+  credentials <- read.csv(".access/acled.csv")
+  resps <- request("https://api.acleddata.com/cast/read") %>%
+    req_url_query(key = credentials$key, email = credentials$username) %>%
+    req_perform_iterative(next_req = iterate_with_offset("page"))
+  resps %>%
+    resps_successes() %>%
+    resps_data(\(resp) {resp_body_json(resp)$data})
+}
+
+# Initial pass at Factiva keywords
+print("Preparing keywords")
+keywords <- read_xlsx("source-data/keywords/wb_food-insecurity-predictions_167-keywords.xlsx") %>%
+  filter(include == 1) %>% pull(keyword)
+news <- read_csv("source-data/keywords/time_series_with_causes_zscore_full.csv",
+         col_types = c("ddcdcddcd", .default = "d"), lazy = T) %>%
+  select(country, admin_code, admin_name, year_month, year, month, contains(keywords) & ends_with("_0")) %>%
+  mutate(country = factor(country)) %>%
+  summarize(.by = c(country, year, month),
+    across(ends_with("_0"), list(
+      # max = ~ max(.x, na.rm = T),
+      mean = ~ mean(.x, na.rm = T)))) %>%
+  mutate(
+    iso3 = forcats::fct_relabel(country, \(x) name2iso(x)),
+    month = factor(month, levels = 1:12)) %>%
+  complete(year, month, iso3) %>%
+  arrange(iso3, year, month) %>%
+  group_by(iso3) %>%
+  fill(everything()) %>%
+  ungroup() %>%
+  filter(!is.na(country)) %>%
+  mutate(
+    month = as.numeric(as.character(month)),
+    iso3 = as.character(iso3)) %>%
+  rowwise() %>%
+  mutate(ALL_KEYWORDS_MEAN = mean(c_across(-c(1:4))))
+
+news_correlation <-
+  inner_join(
+    select(training_limited, iso3, year, month, starts_with("trigger"), contains("coup"),
+      ACLED_events, ACLED_BRD_per_100k, ACLED_conflict_related_deaths,
+      UCDP_BRD, UCDP_BRD_per_100k,
+      POLECAT_intensity_negative_only_event_count, POLECAT_negative_events_sum = POLECAT_intensity_negative_only_sum_of_event_intensity),
+    select(news, -country, -contains("neighbor")),
+    by = join_by(iso3, year, month)) %>%
+  mutate(across(where(is.logical), ~ as.numeric(.x)))
+
+# news_correlation %>%
+#   filter(!is.na(ACLED_events) & !is.na(coup_0_max) & !is.infinite(coup_0_max)) %>%
+# { cor(.$coup_0_max, .$ACLED_events, use = "pairwise.complete.obs") }
+
+cor_df <- news_correlation %>%
+  # select(-iso3, -year, -month) %>%
+  select(-iso3, -year, -month, -GIC_coup_failed) %>%
+  cor(., use = "pairwise.complete.obs") %>% 
+  as.data.frame() %>%
+  filter(rownames(.) %in% names(news) | str_detect(rownames(.), "POLECAT")) %>%
+  select(contains("trigger"), contains("GIC"), contains("ACLED"), contains("UCDP"), contains("POLECAT")) %>%
+  arrange(trigger_total_risk + trigger_total_risk)
+M <- as.matrix(cor_df)
+
+png(height=600, width=1800, file="news-corrplot.png", type = "cairo")
+corrplot::corrplot(t(M), method = "shade")
+dev.off()
+
+# How many missing observations are there?
+news_correlation %>%
+  apply(2, \(col1) {
+    apply(news_correlation, 2, \(col2) {
+      sum(!(is.na(col1) | is.na(col2)))
+    })
+    })
+# Not that many, still many observations for each pairing (typically 2000+)
+
+# Correlation plot for POLECAT, ICEWS, Conflictforecast.org
+
+M2 <- training_limited %>%
+  select(
+    starts_with("trigger"), contains("coup"),
+    ACLED_events, ACLED_BRD_per_100k, ACLED_conflict_related_deaths,
+    UCDP_BRD, UCDP_BRD_per_100k,
+    contains("POLECAT"), contains("ICEWS"), contains("CONFLICTFORECAST")) %>%
+    mutate(across(where(is.logical), ~ as.numeric(.x))) %>%
+    # str()
+    cor(use = "pairwise.complete.obs")
+
+png(height=1800, width=1800, file="forecast-corrplot.png", type = "cairo")
+corrplot::corrplot(M2, method = "shade")
+# corrplot::corrplot(M2, method = "shade", order = "AOE")
+dev.off()
+
+outcome_names <-  c("trigger_total_risk", "trigger_change_risk", "GIC_coup_successful", "GIC_coup_failed",
+    "ACLED_events", "ACLED_BRD_per_100k", "ACLED_conflict_related_deaths",
+    "UCDP_BRD", "UCDP_BRD_per_100k")
+
+M2_narrow <- training_limited %>%
+  select(
+    all_of(outcome_names),
+    matches("POLECAT_(intensity_negative|event_type_be).*(_sum_of_event_intensity$|count$)"),
+    # # contains("ICEWS")) %>%
+    NEG_ICEWS_ASSAULT_event_count, NEG_ICEWS_FIGHT_event_count, `POS_ICEWS_ENGAGE IN MATERIAL COOPERATION_event_count`,
+    `POS_ICEWS_ENGAGE IN DIPLOMATIC COOPERATION_event_count`, NEG_ICEWS_ASSAULT_event_count, `NEG_ICEWS_USE UNCONVENTIONAL MASS VIOLENCE_event_count`,
+    NEG_ICEWS_PROTEST_event_count,
+    # , contains("ICEWS"),
+    any_of(paste0("CONFLICTFORECAST_stock_topic_", c(2, 4, 5, 10, 11, 14, 15)))) %>%
+    # contains("CONFLICTFORECAST")) %>%
+    # mutate(across(where(is.logical), ~ as.numeric(.x))) %>%
+    # # str()
+    cor(use = "pairwise.complete.obs")
+
+png(height=1800, width=1800, file="forecast-corrplot-narrow.png", type = "cairo")
+corrplot::corrplot(M2_narrow, method = "shade")
+# corrplot::corrplot(M2, method = "shade", order = "AOE")
+dev.off()
+
+order_AOE <- corrplot::corrMatOrder(M2_narrow, order = "AOE")
+
+M2_narrow_rect <- M2_narrow[order_AOE, order_AOE] %>%
+  as.data.frame() %>%
+  filter(rownames(.) %in% outcome_names) %>%
+  select(-all_of(outcome_names)) %>%
+  as.matrix()
+
+png(height=600, width=800, file="forecast-corrplot-narrow-rect.png", type = "cairo")
+corrplot::corrplot(M2_narrow_rect, method = "shade", tl.srt = 65)
+# corrplot::corrplot(M2, method = "shade", order = "AOE")
+dev.off()
+
 # BTI Transformation Index
 write_bti_csv <- function() {
   file <- "source-data/BTI_2006-2024_Scores.xlsx"
@@ -1518,4 +1649,4 @@ write_bti_csv <- function() {
     fill(starts_with("BTI"))
   write_csv(bti, file.path(cm_dir, "bti.csv"))
 }
-write_bti_csv()
+
