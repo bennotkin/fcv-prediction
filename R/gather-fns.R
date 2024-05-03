@@ -306,7 +306,7 @@ ucdp_all <- bind_rows(ucdp_geo, ucdp_candidate_2023, ucdp_candidate_2024)
 # Disaggregate event timespans to daily averages
 ucdp_brd_nested <- ucdp_all %>%
   filter(year > 1999) %>%
-  select(country, country_id, date_start, date_end, deaths = best) %>%
+  select(id, country, country_id, date_start, date_end, deaths = best) %>%
   rowwise() %>%
   mutate(.keep = "unused",
     across(c(date_start, date_end), ~ as.Date(.x)),
@@ -321,13 +321,14 @@ ucdp_brd <- ucdp_brd_nested %>%
     date = as.Date(date),
     month = lubridate::month(date),
     year = lubridate::year(date)) %>%
-  summarize(.by = c(country, country_id, year, month), deaths = sum(daily_deaths)) %>%
-  mutate(iso3 = countrycode(country_id, origin = "gwn", destination = "iso3c", custom_match = c("345" = "SRB", "678" = "YEM"))) %>%
+  summarize(.by = c(country, country_id, year, month), deaths = sum(daily_deaths), events = n()) %>%
+  mutate(iso3 = countrycode(country_id, origin = "gwn", destination = "iso3c",
+                custom_match = c("345" = "SRB", "347" = "XKX", "678" = "YEM", "816"= "VNM"))) %>%
   select(-country, -country_id)
 # Set values to 0 for all NAs (UCDP has global coverage)
 ucdp_monthly <- left_join(starter, ucdp_brd, by = c("iso3", "year", "month")) %>%
-  tidyr::replace_na(list(deaths = 0)) %>%
-  rename(UCDP_BRD = deaths) %>%
+  tidyr::replace_na(list(deaths = 0, events = 0)) %>%
+  rename(UCDP_BRD = deaths, UCDP_events = events) %>%
   mutate(UCDP_BRD_per_100k = UCDP_BRD/pop * 100000) %>%
   mutate(
     .by = c(iso3),
@@ -452,16 +453,19 @@ reign <- read_csv(
     REIGN_irregular_election_anticipated = irreg_lead_ant,
     REIGN_election_anticipated = anticipation,
     REIGN_election_now = election_now) %>%
-  filter(year >= 2000) %>%
+  filter(year >= 2004) %>%
   mutate(iso3 = forcats::fct_relabel(factor(country), \(x) name2iso(x))) %>%
   mutate(iso3 = case_when(
     country == "UKG" ~ "GBR",
     country == "Cen African Rep" ~ "CAF",
     T ~ iso3)) %>%
   select(iso3, year, month, contains("REIGN")) %>%
-  mutate(iso3 = factor(iso3)) %>%
+  mutate(
+    iso3 = factor(iso3),
+    yearmon = as.yearmon(paste0(year, "-", month))) %>%
   summarize(.by = c(iso3, year, month), across(contains("REIGN"), max, na.rm = T))
-reign_monthly <- left_join(starter, reign, by = c("iso3", "year", "month")) %>%
+reign_monthly <- left_join(starter, reign, by = c("iso3", "year", "month", "yearmon")) %>%
+  filter(between(yearmon, min(reign$yearmon), max(reign$yearmon))) %>%
   sjmisc::replace_na(contains("REIGN"), value = 0)
   write_csv(reign_monthly, file.path(cm_dir, "reign.csv"))
 }
