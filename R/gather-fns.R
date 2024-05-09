@@ -363,7 +363,7 @@ write_gic_csv()
 # Add IFES on elections (API doesn't include interference)---------------------
 lag_multi <- function(x, ns, default = NA, matrix = T, FUN = NULL) {
   mat <- matrix(unlist(map(ns, \(n) lag(x, n, default = default))), ncol = length(ns), nrow = length(x))
-  if (!matrix) return(mat)
+  if (matrix) return(mat)
   apply(mat, 1, c, simplify = F)
 }
 

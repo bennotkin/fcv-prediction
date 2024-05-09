@@ -4,10 +4,9 @@
 #   DATE: February 2024
 #-------------------------------------------------------------------------------
 #   Notes: For updated version of the R script use the link below in Github repo
-#   https://github.com/bennotkin/fcv-prediction/blob/main/compile_fcv_training_dataset.R
+#   https://github.com/bennotkin/fcv-prediction/blob/main/R/gather.R
 #   Please be aware that source files can be found in the shared Office folder
 #   File locations in the R code should be replaced with relevant local source
-
 
 #Load packages------------------------------------------------------------------
 # Install packages from CRAN using librarian
@@ -19,6 +18,9 @@ librarian::shelf(
 source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
 # Install vdemdata package from GitHub
 devtools::install_github("vdeminstitute/vdemdata")
+
+source("R/setup.R")
+source("R/gather-fns.R")
 
 # Compile list of countries using iso3 codes-------------------------------------
 country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
@@ -51,7 +53,8 @@ write_lending_csv()
 write_acled_csv()
 write_ucdp_csv()
 write_ifes_csv()
-write_reign_csv()
+write_gic_csv()
+write_reign_csv() # Now defunct since 2021
 write_fews_csv()
 write_eiu_csv()
 write_fsi_csv()
@@ -65,7 +68,7 @@ write_gdp_csv()
 write_cpi_csv()
 write_wgi_csv()
 write_gender_inequality_csv()
-write_idmc_csv()
+write_idmc_csv() # Verified and candidate data for the past 3 months
 write_imf_rsui_csv()
 write_spei_csv()
 write_natural_resource_rents_csv()

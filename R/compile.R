@@ -4,45 +4,17 @@
 #   DATE: February 2024
 #-------------------------------------------------------------------------------
 #   Notes: For updated version of the R script use the link below in Github repo
-#   https://github.com/bennotkin/fcv-prediction/blob/main/compile_fcv_training_dataset.R
+#   https://github.com/bennotkin/fcv-prediction/blob/main/R/compile.R
 #   Please be aware that source files can be found in the shared Office folder
 #   File locations in the R code should be replaced with relevant local source
+#
+#   File compiles training data from CSVs written with R/gather.R 
 
-
-#Load packages------------------------------------------------------------------
-# Install packages from CRAN using librarian
-if (!"librarian" %in% installed.packages()) install.packages("librarian")
-librarian::shelf(
-  curl, countrycode, glue, httr, httr2, jsonlite, lubridate, pdftools,
-  purrr, readr, readxl, rvest, sjmisc, stringr, tidyr, zoo, dplyr)
-# Install helper functions from GitHub
-source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
-# Install vdemdata package from GitHub
-devtools::install_github("vdeminstitute/vdemdata")
-
-# Compile list of countries using iso3 codes-------------------------------------
-country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c"))
+source("R/setup.R")
 
 cm_dir <- "country-month-data"
-if (!dir.exists(cm_dir)) dir.create(cm_dir)
 
-# Ask about rerunning
-if (!file.exists("source-data/acled-processed.csv")) {
-  run_acled <- T 
-} else {
-  run_acled <- menu(c("Yes", "No"), title = "Re-download ACLED?") == 1
-}
-if (!file.exists("source-data/cw-pages-list.RDS")) {
-  run_cw <- menu(c("Yes", "No"), title = "No CrisisWatch file. Scraping will take ~3 hours. It is faster to download the RDS file from OneDrive. Proceed to scrape CrisisWatch?") == 1
-} else {
-  run_cw <- menu(c("Yes", "No"), title = "Re-scrape CrisisWatch? (Will take ~3 hours)") == 1
-}
-if (!file.exists("source-data/polecat.csv")) {
-  run_polecat <- T
-} else {
-  run_polecat <- menu(c("Yes", "No"), title = "Reread POLECAT?") == 1
-}
+starter <- initiate_df()
 
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
@@ -170,6 +142,21 @@ training_limited <- training %>%
 write_csv(training_limited, "FCV_training_dataset.csv")
 
 # Other spatial lags
+borders_wide <- borders %>%
+  mutate(value = 1) %>%
+  # mutate(.before = 2,
+  #   year = list(min(training_limited$year):max(training_limited$year)),
+  #   month = list(1:12)) %>% 
+  #   unnest(year) %>%
+  #   unnest(month) %>%
+  pivot_wider(names_from = border_iso3, values_from = value, values_fill = 0) %>%
+  select(iso3, sort(any_of(.$iso3))) %>%
+  select(iso3, sort(names(.))) %>%
+  filter(iso3 %in% names(.) & !is.na(iso3)) %>%
+  arrange(iso3) #%>%
+
+which_not(borders_wide$iso3, names(borders_wide), both = T)
+
 Bnames <- borders_wide$iso3
 B <- as.matrix(borders_wide[,-1])
 rownames(B) <- Bnames
