@@ -22,10 +22,6 @@ devtools::install_github("vdeminstitute/vdemdata")
 source("R/setup.R")
 source("R/gather-fns.R")
 
-# Compile list of countries using iso3 codes-------------------------------------
-country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c"))
-
 cm_dir <- "country-month-data"
 if (!dir.exists(cm_dir)) dir.create(cm_dir)
 
@@ -46,8 +42,7 @@ if (!file.exists("source-data/polecat.csv")) {
   run_polecat <- menu(c("Yes", "No"), title = "Reread POLECAT?") == 1
 }
 
-pop <- get_pop()
-starter <- initiate_df()
+starter <- write_starter_csv()
 write_income_csv()
 write_lending_csv()
 write_acled_csv()

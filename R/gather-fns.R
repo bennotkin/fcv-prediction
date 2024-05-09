@@ -10,32 +10,35 @@ get_pop <- function() {
 
 # Create starter dataframe with all country-year-months------------------------
 print("Preparing base data frame")
-initiate_df <- function() {
-starter <- country_list %>%
-  select(iso3 = Code) %>%
-  filter(iso3 != "CHI") %>%
-  left_join(pop, by = c("iso3")) %>%
-  # No WBG population data for Taiwan
-  filter(iso3 != "TWN") %>%
-  bind_rows(data.frame(iso3 = "TWN", pop = NA, year = 2000:2024)) %>%
-  # Add in months and make sure every country has rows for all years 2000-2024
-  mutate(
-    across(c(iso3), ~ factor(.x)),
-    year = factor(year, levels = 2000:2024),
-    month = paste(1:12, collapse = ",")) %>%
-  separate_longer_delim(month, delim = ",") %>%
-  mutate(month = as.numeric(month)) %>%
-  complete(iso3, year, month) %>%
-  # Population data only extends to 2022; use 2022 data for 2023 and 2024
-  group_by(iso3) %>%
-  fill(pop) %>%
-  ungroup() %>%
-    mutate(.before = year,
-      year = as.numeric(as.character(year)),
-      yearmon = as.yearmon(glue("{year}-{month}"))) %>%
-  arrange(year, month, iso3) %>%
-  # Remove months after February 2024
-  filter(!(year == 2024 & month > 3))
+write_starter_csv <- function() {
+  country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
+    col_types = cols(.default = "c"))
+  starter <- country_list %>%
+    select(iso3 = Code) %>%
+    filter(iso3 != "CHI") %>%
+    left_join(get_pop(), by = c("iso3")) %>%
+    # No WBG population data for Taiwan
+    filter(iso3 != "TWN") %>%
+    bind_rows(data.frame(iso3 = "TWN", pop = NA, year = 2000:2024)) %>%
+    # Add in months and make sure every country has rows for all years 2000-2024
+    mutate(
+      across(c(iso3), ~ factor(.x)),
+      year = factor(year, levels = 2000:2024),
+      month = paste(1:12, collapse = ",")) %>%
+    separate_longer_delim(month, delim = ",") %>%
+    mutate(month = as.numeric(month)) %>%
+    complete(iso3, year, month) %>%
+    # Population data only extends to 2022; use 2022 data for 2023 and 2024
+    group_by(iso3) %>%
+    fill(pop) %>%
+    ungroup() %>%
+      mutate(.before = year,
+        year = as.numeric(as.character(year)),
+        yearmon = as.yearmon(glue("{year}-{month}"))) %>%
+    arrange(year, month, iso3) %>%
+    # Remove months after February 2024
+    filter(!(year == 2024 & month > 3))
+    write_csv(starter, file.path(cm_dir, "starter.csv"))
   return(starter)
 }
 

@@ -9,7 +9,3 @@ librarian::stock(matrixStats, ggplot2)
 source("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/fns/helpers.R")
 # Install vdemdata package from GitHub
 devtools::install_github("vdeminstitute/vdemdata")
-
-# Compile list of countries using iso3 codes-------------------------------------
-country_list <- read_csv("https://raw.githubusercontent.com/compoundrisk/monitor/databricks/src/country-groups.csv",
-    col_types = cols(.default = "c"))
