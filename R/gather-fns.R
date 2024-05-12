@@ -303,7 +303,10 @@ write_ucdp_csv <- function() {
 ucdp_geo <- readRDS("source-data/GEDEvent_v23_1.rds")
 ucdp_candidate_2023 <- read_csv("https://ucdp.uu.se/downloads/candidateged/GEDEvent_v23_01_23_12.csv",
   col_types = "dcddcd_dc_dc_dc_dcdcccccdccccddcdcdcddTTddddddddd", col_names = names(ucdp_geo))
-ucdp_candidate_2024 <- read_csv("https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_1.csv",
+ucdp_candidate_2024 <- read_csv(c(
+    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_1.csv",
+    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_2.csv",
+    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_3.csv"),
   col_types = "dcddcd_dc_dc_dc_dcdcccccdccccddcdcdcddTTddddddddd", col_names = names(ucdp_geo))
 ucdp_all <- bind_rows(ucdp_geo, ucdp_candidate_2023, ucdp_candidate_2024)
 # Disaggregate event timespans to daily averages
@@ -434,11 +437,11 @@ ifes_monthly <- ifes %>%
   write_csv(ifes_monthly, file.path(cm_dir, "ifes.csv"))
 }
 
-inner_join(reign, ifes_monthly) %>%
-  dplyr::count(REIGN_election_now, IFES_election)
-  # { cor(x = .$REIGN_election_anticipated, y = .$IFES_anticipated) }
-  # { cor(x = .$REIGN_election_anticipated, y = .$IFES_exec_anticipated) }
-  # { cor(x = .$REIGN_irregular_election_anticipated, y = .$IFES_snap_anticipated) }
+# inner_join(reign, ifes_monthly) %>%
+#   dplyr::count(REIGN_election_now, IFES_election)
+#   # { cor(x = .$REIGN_election_anticipated, y = .$IFES_anticipated) }
+#   # { cor(x = .$REIGN_election_anticipated, y = .$IFES_exec_anticipated) }
+#   # { cor(x = .$REIGN_irregular_election_anticipated, y = .$IFES_snap_anticipated) }
 
 #   pivot_wider(names_from = district_type, values_from = )
 
@@ -1369,11 +1372,9 @@ pc_lastmonth <- polecat %>% select(yearmon, year, month) %>% slice_max(yearmon, 
 # POLECAT & ICEWS from Mathijs
 print("Preparing second POLECAT (& ICEWS)")
 write_polecat_icews_csv <- function() {
-polecat2 <- read_csv("source-data/polecat2/ICEWS_and_POLECAT.csv", col_types = c("Dcc", .default = "d")) %>%
-  mutate(iso3 = country_code, year = lubridate::year(date), month = lubridate::month(date), .keep = "unused", .before = 1) %>%
-  select(-country) %>%
-  distinct() %>%
-  filter(iso3 != "DEU") # Removing Germany because it's not in our scope and it has multiple entries
+polecat2 <- read_csv("source-data/icews_and_polecat.csv") %>%
+  rename(iso3 = country) %>%
+  select(-date)
   write_csv(polecat2, file.path(cm_dir, "polecat-icews.csv"))
 
 # ICEWS by itself
@@ -1458,10 +1459,6 @@ conflict_forecast <- read_csv(file, col_types = c("f", .default = "c")) %>%
   write_csv(conflict_forecast, file.path(cm_dir, "conflictforecast-org.csv"))
 }
 
-mathijs <- read_csv("/Users/bennotkin/Downloads/FCV_training_dataset_with_conflictforecast_data_and_icews.csv")
-waldo::compare(head(training_limited), head(mathijs))
-which_not(names(training_limited), names(mathijs), both = T)
-
 # UCDP ViEWS
 print("Preparing ViEWS")
   write_views_csv <- function() {
@@ -1501,124 +1498,6 @@ write_acled_cast_csv <- function() {
     resps_successes() %>%
     resps_data(\(resp) {resp_body_json(resp)$data})
 }
-
-# Initial pass at Factiva keywords
-print("Preparing keywords")
-keywords <- read_xlsx("source-data/keywords/wb_food-insecurity-predictions_167-keywords.xlsx") %>%
-  filter(include == 1) %>% pull(keyword)
-news <- read_csv("source-data/keywords/time_series_with_causes_zscore_full.csv",
-         col_types = c("ddcdcddcd", .default = "d"), lazy = T) %>%
-  select(country, admin_code, admin_name, year_month, year, month, contains(keywords) & ends_with("_0")) %>%
-  mutate(country = factor(country)) %>%
-  summarize(.by = c(country, year, month),
-    across(ends_with("_0"), list(
-      # max = ~ max(.x, na.rm = T),
-      mean = ~ mean(.x, na.rm = T)))) %>%
-  mutate(
-    iso3 = forcats::fct_relabel(country, \(x) name2iso(x)),
-    month = factor(month, levels = 1:12)) %>%
-  complete(year, month, iso3) %>%
-  arrange(iso3, year, month) %>%
-  group_by(iso3) %>%
-  fill(everything()) %>%
-  ungroup() %>%
-  filter(!is.na(country)) %>%
-  mutate(
-    month = as.numeric(as.character(month)),
-    iso3 = as.character(iso3)) %>%
-  rowwise() %>%
-  mutate(ALL_KEYWORDS_MEAN = mean(c_across(-c(1:4))))
-
-news_correlation <-
-  inner_join(
-    select(training_limited, iso3, year, month, starts_with("trigger"), contains("coup"),
-      ACLED_events, ACLED_BRD_per_100k, ACLED_conflict_related_deaths,
-      UCDP_BRD, UCDP_BRD_per_100k,
-      POLECAT_intensity_negative_only_event_count, POLECAT_negative_events_sum = POLECAT_intensity_negative_only_sum_of_event_intensity),
-    select(news, -country, -contains("neighbor")),
-    by = join_by(iso3, year, month)) %>%
-  mutate(across(where(is.logical), ~ as.numeric(.x)))
-
-# news_correlation %>%
-#   filter(!is.na(ACLED_events) & !is.na(coup_0_max) & !is.infinite(coup_0_max)) %>%
-# { cor(.$coup_0_max, .$ACLED_events, use = "pairwise.complete.obs") }
-
-cor_df <- news_correlation %>%
-  # select(-iso3, -year, -month) %>%
-  select(-iso3, -year, -month, -GIC_coup_failed) %>%
-  cor(., use = "pairwise.complete.obs") %>% 
-  as.data.frame() %>%
-  filter(rownames(.) %in% names(news) | str_detect(rownames(.), "POLECAT")) %>%
-  select(contains("trigger"), contains("GIC"), contains("ACLED"), contains("UCDP"), contains("POLECAT")) %>%
-  arrange(trigger_total_risk + trigger_total_risk)
-M <- as.matrix(cor_df)
-
-png(height=600, width=1800, file="news-corrplot.png", type = "cairo")
-corrplot::corrplot(t(M), method = "shade")
-dev.off()
-
-# How many missing observations are there?
-news_correlation %>%
-  apply(2, \(col1) {
-    apply(news_correlation, 2, \(col2) {
-      sum(!(is.na(col1) | is.na(col2)))
-    })
-    })
-# Not that many, still many observations for each pairing (typically 2000+)
-
-# Correlation plot for POLECAT, ICEWS, Conflictforecast.org
-
-M2 <- training_limited %>%
-  select(
-    starts_with("trigger"), contains("coup"),
-    ACLED_events, ACLED_BRD_per_100k, ACLED_conflict_related_deaths,
-    UCDP_BRD, UCDP_BRD_per_100k,
-    contains("POLECAT"), contains("ICEWS"), contains("CONFLICTFORECAST")) %>%
-    mutate(across(where(is.logical), ~ as.numeric(.x))) %>%
-    # str()
-    cor(use = "pairwise.complete.obs")
-
-png(height=1800, width=1800, file="forecast-corrplot.png", type = "cairo")
-corrplot::corrplot(M2, method = "shade")
-# corrplot::corrplot(M2, method = "shade", order = "AOE")
-dev.off()
-
-outcome_names <-  c("trigger_total_risk", "trigger_change_risk", "GIC_coup_successful", "GIC_coup_failed",
-    "ACLED_events", "ACLED_BRD_per_100k", "ACLED_conflict_related_deaths",
-    "UCDP_BRD", "UCDP_BRD_per_100k")
-
-M2_narrow <- training_limited %>%
-  select(
-    all_of(outcome_names),
-    matches("POLECAT_(intensity_negative|event_type_be).*(_sum_of_event_intensity$|count$)"),
-    # # contains("ICEWS")) %>%
-    NEG_ICEWS_ASSAULT_event_count, NEG_ICEWS_FIGHT_event_count, `POS_ICEWS_ENGAGE IN MATERIAL COOPERATION_event_count`,
-    `POS_ICEWS_ENGAGE IN DIPLOMATIC COOPERATION_event_count`, NEG_ICEWS_ASSAULT_event_count, `NEG_ICEWS_USE UNCONVENTIONAL MASS VIOLENCE_event_count`,
-    NEG_ICEWS_PROTEST_event_count,
-    # , contains("ICEWS"),
-    any_of(paste0("CONFLICTFORECAST_stock_topic_", c(2, 4, 5, 10, 11, 14, 15)))) %>%
-    # contains("CONFLICTFORECAST")) %>%
-    # mutate(across(where(is.logical), ~ as.numeric(.x))) %>%
-    # # str()
-    cor(use = "pairwise.complete.obs")
-
-png(height=1800, width=1800, file="forecast-corrplot-narrow.png", type = "cairo")
-corrplot::corrplot(M2_narrow, method = "shade")
-# corrplot::corrplot(M2, method = "shade", order = "AOE")
-dev.off()
-
-order_AOE <- corrplot::corrMatOrder(M2_narrow, order = "AOE")
-
-M2_narrow_rect <- M2_narrow[order_AOE, order_AOE] %>%
-  as.data.frame() %>%
-  filter(rownames(.) %in% outcome_names) %>%
-  select(-all_of(outcome_names)) %>%
-  as.matrix()
-
-png(height=600, width=800, file="forecast-corrplot-narrow-rect.png", type = "cairo")
-corrplot::corrplot(M2_narrow_rect, method = "shade", tl.srt = 65)
-# corrplot::corrplot(M2, method = "shade", order = "AOE")
-dev.off()
 
 # BTI Transformation Index
 write_bti_csv <- function() {

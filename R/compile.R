@@ -136,7 +136,7 @@ training <- training %>%
 
 # Limit training dataset to low and middle income countries
 training_limited <- training %>%
-  filter(iso3 %in% unique(filter(., WBG_income_level < 3 & year == 2024)$iso3))
+  filter(iso3 %in% unique(filter(., WBG_income_level < 4 & year == 2024)$iso3))
 
 # Write FCV_training_dataset.csv
 write_csv(training_limited, "FCV_training_dataset.csv")
