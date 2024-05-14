@@ -1506,3 +1506,48 @@ write_bti_csv <- function() {
   write_csv(bti, file.path(cm_dir, "bti.csv"))
 }
 
+write_crm_fragility_csv <- function() {
+  read_many_runs <- function(runs_directory = file.path(output_directory, "runs"), since = NULL, before = NULL, tail_n = NULL, index_only = T, lazy = F) {
+    files <- sort(list.files(runs_directory))
+    if (!is.null(since)) {
+      dates <- as.Date(str_extract(files, "\\d{4}-\\d{2}-\\d{2}"))
+      files <- files[which(dates >= as.Date(since))]
+    }
+    if (!is.null(before)) {
+      dates <- as.Date(str_extract(files, "\\d{4}-\\d{2}-\\d{2}"))
+      files <- files[which(dates <= as.Date(before))]
+    }
+    if (!is.null(tail_n)) files <- tail(files, n = tail_n)
+    col_types <- if (index_only) '--d------dc---D' else 'dddfffffcdccflD'
+    # all_runs <- bind_rows(lapply(file.path(runs_directory, files), read_csv, col_types = col_types))
+    all_runs <- read_csv(file.path(runs_directory, files), col_types = col_types, lazy = lazy)
+    return(all_runs)
+  }
+
+  crm <- read_many_runs("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/manual/runs", index_only = F, lazy = T) %>%
+    filter(`Data Level` == "Dimension Value" & Outlook %in% c("Overall", "Underlying"), Dimension == "Conflict and Fragility") %>%
+    mutate(
+      iso3 = Country, yearmon = as.yearmon(Date),
+      indicator = glue("CRM {Outlook} Fragility and Conflict"), value_numeric = Value) %>%
+    slice_max(Date, by = c(iso3, yearmon, indicator), with_ties = F) %>%
+    select(iso3, yearmon, indicator, value_numeric) %>%
+    pivot_wider(names_from = indicator, values_from = value_numeric) %>%
+    mutate(.keep = "unused", year = lubridate::year(yearmon), month = lubridate::month(yearmon))
+  write_csv(crm, file.path(cm_dir, "crm-fragility-conflict.csv"))
+}
+
+write_fcs_csv <- function() {
+  fcs <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/fcs.csv") %>%
+    mutate(FCS_normalised = case_when(!is.na(FCV_status) ~ 10, T ~ 0)) %>%
+    rowwise() %>%
+    mutate(yearmon = list(seq.Date(access_date, by = "month", length.out = 12))) %>%
+    ungroup() %>%
+    unnest(yearmon) %>%
+    mutate(yearmon = as.yearmon(yearmon)) %>%
+    slice_max(access_date, by = c(Country, yearmon)) %>%
+    mutate(.keep = "none", iso3 = Country, yearmon = yearmon, indicator = "FCS List", value_numeric = FCS_normalised, value_character = FCV_status) %>%
+    sjmisc::replace_na(value_character, value = "Non-FCS") %>%
+      pivot_wider(names_from = indicator, values_from = value_numeric) %>%
+      mutate(.keep = "unused", year = lubridate::year(yearmon), month = lubridate::month(yearmon))
+  write_csv(fcs, file.path(cm_dir, "fcs-list.csv"))
+}
