@@ -19,7 +19,7 @@ starter <- initiate_df()
 # Combine all relevant datasets together---------------------------------------
 print("Compiling training dataset")
 left_join_with_checks <- function(a, b) {
-    b <- filter(b, year >= 2000)
+  b <- filter(b, year >= 2000)
   b <- select(b, -any_of(c("pop", "yearmon")))
     # if (typeof(b$iso3) == "character") b$iso3 = factor(b$iso3)
     if (typeof(b$year) != "double") b$year = as.numeric(b$year)
@@ -138,7 +138,13 @@ training <- training %>%
 training_limited <- training %>%
   filter(iso3 %in% unique(filter(., WBG_income_level < 4 & year == 2024)$iso3))
 
-# Write FCV_training_dataset.csv
+# Add in indicators without remaking everything
+add_indicator <- function(...) {
+  training_limited <- read_csv("FCV_training_dataset.csv")
+  combined <- Reduce(left_join_with_checks, list(...), init = training_limited)
+  return(combined)
+}
+# training_limited <- add_indicator(…)
 write_csv(training_limited, "FCV_training_dataset.csv")
 
 # Other spatial lags
@@ -194,27 +200,3 @@ slag_df <- map2(slag, unique(training_limited$yearmon), \(x, y) {
 }) %>% bind_rows()
 
 write_csv(slag_df, "spatial-lag.csv")
-
-# Write/append codebook-variables.csv to be used in codebook
-vars <- names(training)
-if(!file.exists("codebook-variables.csv")) {
-  codebook <- tibble(
-    `Data Source` = str_extract(vars, "^([^_]*)"),
-    `Variable Label` = vars,
-    Definition = "")
-  write_csv(codebook, "codebook-variables.csv")
-} else {
-  codebook <- read_csv("codebook-variables.csv", col_types = "ccc")
-  vars_included <- str_replace_all(codebook$`Variable Label`, c("\\n|;\\s*" = "|", "_…" = ".*"))
-  new_vars <- vars[!str_detect(vars, paste0(vars_included, collapse = "|"))]
-  codebook_addition <- tibble(
-    `Data Source` = str_extract(new_vars, "^([^_]*)"),
-    `Variable Label` = new_vars,
-    Definition = "")
-  codebook <- bind_rows(codebook, codebook_addition)
-  # Arrange codebook alphabetically
-  codebook <- bind_rows(
-    filter(codebook, `Data Source` == "Ad-hoc"),
-    filter(codebook, `Data Source` != "Ad-hoc") %>% arrange(`Variable Label`))
-  write_csv(codebook, "codebook-variables.csv")
-}

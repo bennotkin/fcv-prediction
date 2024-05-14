@@ -49,7 +49,7 @@ write_acled_csv()
 write_ucdp_csv()
 write_ifes_csv()
 write_gic_csv()
-write_reign_csv() # Now defunct since 2021
+write_reign_csv() # No need to rerun after initial; defunct since 2021
 write_fews_csv()
 write_eiu_csv()
 write_fsi_csv()
