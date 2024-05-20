@@ -373,12 +373,15 @@ lead_multi <- function(x, ns, default = NA, matrix = T, FUN = NULL) {
 }
 
 write_ifes_csv <- function() {
-  ifes_data <- system(paste0("curl -X GET https://electionguide.org/api/v2/elections_demo/ -H 'Authorization: Token ", readLines(".access/ifes-authorization.txt", warn = F),"'"),
-                      intern = T) %>%
-    fromJSON()
-  
+  url <- "https://electionguide.org/api/v2/elections_demo/"
+  token <- readLines(".access/ifes-authorization.txt", warn = F)
+  ifes_response <- request(url) %>%
+    req_headers(Authorization = paste("Token", token)) %>%
+    req_perform()
+  ifes_data <- ifes_response %>% resp_body_string() %>%
+    fromJSON() %>%
+    as_tibble()
   ifes <- ifes_data %>%
-    as_tibble() %>%
     select(
       election_id, election_name, #date_updated,
       district, election_type,
@@ -398,8 +401,7 @@ write_ifes_csv <- function() {
                                       T ~ election_start_date),
       election_end_date = election_declared_end_date,
       election_end_date = case_when(is.na(election_end_date) ~ election_range_end_date,
-                                    T ~ election_end_date),
-    ) %>%
+                                    T ~ election_end_date)) %>%
     select(iso3, district_type, election_start_date, election_end_date, snap, district_type) %>%
     filter(!is.na(election_start_date) | !is.na(election_end_date)) %>%
     rowwise() %>%
@@ -1040,7 +1042,20 @@ write_epr_csv <- function() {
 
 # CrisisWatch, from web not PDFs
 write_crisiswatch_csv <- function() {
-  if (run_cw) {
+  file <- "source-data/cw-pages-list.RDS"
+  if (!file.exists(file) | run_cw) {
+    from_year <- 2000
+    from_month <- 1
+  } else {
+    cw_pages <- readRDS(file)
+    latest_yearmon <- max(as.yearmon(unique(unlist(map(cw_pages, \(p) p$entry_month)))))
+    from_year <- year(latest_yearmon)
+    from_month <- month(latest_yearmon)
+  }
+
+  to_year <- year(Sys.Date())
+  to_month <- month(Sys.Date())
+
     read_cw_page <- function(page) {
       country_nodes <- page %>%
         html_elements("div.c-crisiswatch-entry")
@@ -1064,7 +1079,8 @@ write_crisiswatch_csv <- function() {
       return(outlist)
     }
     
-    page0 <- read_html("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month=1&from_year=1996&to_month=1&to_year=2024&page=0")
+  base_url <- glue("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month={from_month}&from_year={from_year}&to_month={to_month}&to_year={to_year}&page=")
+  page0 <- read_html(paste0(base_url, 0))
     cw_page0 <- read_cw_page(page0)
     total_pages <- (page0 %>% html_elements(".o-pagination") %>% html_elements("span") %>% html_text() %>%
                       str_extract("\\d+ of (\\d+)", group = T) %>% na.omit() %>% as.numeric()) - 1
@@ -1079,19 +1095,19 @@ write_crisiswatch_csv <- function() {
     }
     
     start_time <- Sys.time()
-    cw_pages <- vector(mode = "list", length = total_pages + 1)
-    cw_pages[[1]] <- cw_page0
+  cw_pages_new <- vector(mode = "list", length = total_pages + 1)
+  cw_pages_new[[1]] <- cw_page0
     for (i in 1:total_pages) {
       if (i %% 10 == 0) progress_update(i, total_pages, start_time)
-      url <- paste0("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month=1&from_year=1996&to_month=1&to_year=2024&page=", i)
+    url <- paste0(base_url, i)
       page <- read_html(url)
-      cw_pages[[i + 1]] <- read_cw_page(page)
+    cw_pages_new[[i + 1]] <- read_cw_page(page)
     }
-    # saveRDS(cw_pages, "source-data/cw-pages-list.RDS")
-  } else {
-    cw_pages <- readRDS("source-data/cw-pages-list.RDS")
-  }
-  names(cw_pages) <- map(cw_pages, \(x) paste(x$name, x$entry_month, sep = " - ")) %>% unlist()
+  cw_pages_new <- unlist(cw_pages_new, recursive = F)
+  names(cw_pages_new) <- unlist(map(cw_pages_new, \(x) paste(x$name, x$entry_month, sep = " - ")))
+  cw_pages <- if (exists("cw_pages")) c(cw_pages_new, cw_pages) else cw_pages_new
+  cw_pages <- cw_pages[which(!duplicated(names(cw_pages)))]
+  saveRDS(cw_pages, "source-data/cw-pages-list.RDS")
   
   cw_df <- map(cw_pages, ~ .x$past5) %>%
     bind_rows() %>%
