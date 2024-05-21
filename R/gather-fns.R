@@ -34,9 +34,9 @@ write_starter_csv <- function() {
     mutate(.before = year,
            year = as.numeric(as.character(year)),
            yearmon = as.yearmon(glue("{year}-{month}"))) %>%
-    arrange(year, month, iso3) %>%
-    # Remove months after February 2024
-    filter(!(year == 2024 & month > 3))
+    arrange(yearmon, iso3) %>%
+    # Remove months after present
+    filter(yearmon <= as.yearmon(Sys.Date()))
   write_csv(starter, file.path(cm_dir, "starter.csv"))
   return(starter)
 }
@@ -301,7 +301,8 @@ write_ucdp_csv <- function() {
   ucdp_candidate_2024 <- read_csv(c(
     "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_1.csv",
     "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_2.csv",
-    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_3.csv"),
+    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_3.csv",
+    "https://ucdp.uu.se/downloads/candidateged/GEDEvent_v24_0_4.csv"),
     col_types = "dcddcd_dc_dc_dc_dcdcccccdccccddcdcdcddTTddddddddd", col_names = names(ucdp_geo))
   ucdp_all <- bind_rows(ucdp_geo, ucdp_candidate_2023, ucdp_candidate_2024)
   # Disaggregate event timespans to daily averages
@@ -353,9 +354,11 @@ write_gic_csv <- function() {
       GIC_coup_failed = case_when(coup == 1 ~ T)) %>%
     summarize(
       .by = c(iso3, year, month),
-      across(.cols = contains("GIC"), ~ sum(.x, na.rm = T)))
+      across(.cols = contains("GIC"), ~ sum(.x, na.rm = T)),
+      GIC_coup = max(coup)) %>%
+    mutate(GIC_coup_text = paste(case_when(GIC_coup == 1 ~ "Failed coup", GIC_coup == 2 ~ "Successful coup"), "-", month.abb[month], year))
   gic <- left_join(starter, gic, by = c("iso3", "year", "month")) %>%
-    sjmisc::replace_na(contains("GIC"), value = 0)
+    replace_na(list(GIC_coup_failed = 0, GIC_coup_successful = 0, GIC_coup = 0, GIC_coup_text = "No coup attempt"))
   write_csv(gic, file.path(cm_dir, "gic.csv"))
 }
 
@@ -587,7 +590,9 @@ write_fsi_csv <- function() {
         select(Country, FSI = Total) %>%
         mutate(
           FSI = as.numeric(FSI),
-          year = as.numeric(str_extract(file, "\\d{4}")))
+          year = as.numeric(str_extract(file, "\\d{4}")),
+          yearmon = as.yearmon(year + .5)) %>%
+        select(-year)
       return(df)
     }) %>%
     bind_rows() %>%
@@ -595,7 +600,13 @@ write_fsi_csv <- function() {
     # Removing West Bank & Gaza because it is lumped in with Israel
     mutate(iso3 = str_replace(iso3, "ISR, PSE", "ISR"))
   
-  fsi_monthly <- left_join(fsi, starter, by = c("iso3", "year"))
+  fsi_monthly <- right_join(fsi, starter, by = c("iso3", "yearmon")) %>%
+    arrange(iso3, yearmon) %>%
+    group_by(iso3) %>%
+    fill(FSI) %>%
+    filter(!is.na(FSI)) %>% 
+    relocate(FSI, .after = last_col()) %>%
+    mutate(.after = yearmon, year = year(yearmon), month = month(yearmon))
   write_csv(fsi_monthly, file.path(cm_dir, "fsi.csv"))
 }
 
@@ -687,13 +698,42 @@ write_inform_severity_csv <- function() {
 }
 
 write_acaps_risklist_csv <- function() {
-  risk_list <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/acaps_risklist.csv") %>%
+  # We need to decide how we will aggregate risk levels
+  
+  # This doesn't account for historical versions of the event. For this we will
+  # need to use the inputs-archive from the CRM. We can delay this until we are
+  # on Databricks.
+  
+  # risk_list <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/acaps_risklist.csv")
+
+  credentials <- read.csv(".access/acaps-credentials.csv")
+  credentials <- list(username=credentials$username, password=credentials$password)
+  token <- request("https://api.acaps.org/api/v1/token-auth/") %>%
+    # req_body_raw(credentials)
+    req_body_json(credentials) %>%
+    # req_dry_run()
+    req_perform() %>%
+    resp_body_json()
+  response <- request("https://api.acaps.org/api/v1/risk-list/") %>%
+    req_headers(Authorization = paste("Token", token)) %>%
+    req_perform_iterative(
+      next_req = \(resp, req) {
+        cursor <- resp_body_json(resp)[["next"]]
+        print(cursor)
+        if (is.null(cursor)) return(NULL)
+        req %>% req_url(cursor)
+      })
+  df <- response %>%
+    resps_data(\(resp) fromJSON(resp_body_string(resp))$results) %>%
+    bind_rows() %>%
+    as_tibble() %>%
+    unnest(c(iso3))
+  risk_list <- df %>%
     mutate(
       yearmon = as.yearmon(last_risk_update),
-      risk_level = ordered(risk_level, levels = c(NA, "Low", "Medium", "High"))) %>%
-    summarize(.by = c(iso3, yearmon), risk_level = as.numeric(max(risk_level, na.rm = T))) %>%
-    filter(!is.na(risk_level)) %>%
-    rename_with(.cols = -c(iso3, yearmon), ~ paste0("ACAPS_", .x)) %>%
+      risk_level = as.numeric(ordered(risk_level, levels = c(NA, "Low", "Medium", "High")))) %>%
+    select(iso3, yearmon, ACAPS_risk_level = risk_level, ACAPS_risk_title = risk_title) %>%
+    slice_max(by = c(iso3, yearmon), order_by = ACAPS_risk_level, with_ties = F, na_rm = T) %>%
     mutate(.after = yearmon, year = lubridate::year(yearmon), month = lubridate::month(yearmon))
   write_csv(risk_list, file.path(cm_dir, "acaps-risklist.csv"))
 }
@@ -1056,53 +1096,53 @@ write_crisiswatch_csv <- function() {
   to_year <- year(Sys.Date())
   to_month <- month(Sys.Date())
 
-    read_cw_page <- function(page) {
-      country_nodes <- page %>%
-        html_elements("div.c-crisiswatch-entry")
-      outlist <- country_nodes %>% map(\(x) {
-        country_string <- x %>% html_elements("h3") %>% html_text()
-        country_name <- str_replace_all(country_string, c("^[\\s\\n]*" = "", "[\\s\\n]*$" = ""))
-        if (length(country_string) != 1) stop(paste("Wrong number of country names:", country_name, collapse = "; "))
-        entry_month <- x %>% html_elements("time") %>% html_text()
-        last_5_months <- x %>% html_elements(".o-state-entry")
-        months <- last_5_months %>% html_attr("title")
-        # states <- last_5_months %>% html_element("a>span:first-of-type") %>% html_attr("class")
-        states <- 1:5 %>% 
-          map(\(i) html_attr(html_element(last_5_months, glue("a>span:nth-of-type({i})")), "class")) %>%
-          unlist() %>% matrix(ncol = 5) %>% apply(1, \(mo) {paste(na.omit(mo), collapse = ", ")})
-        if (length(states) != length(months)) stop(glue("Length of states and months do not match for {country_name}"))
-        month_states <- tibble(country = country_name, entry_month = entry_month, month = months, status = states)
-        text <- x %>% html_elements(".o-crisis-states__detail") %>%
-          html_elements("p") %>% html_text()
-        return(list(name = country_name, entry_month = entry_month, past5 = month_states, text = text))
-      })
-      return(outlist)
-    }
-    
+  read_cw_page <- function(page) {
+    country_nodes <- page %>%
+      html_elements("div.c-crisiswatch-entry")
+    outlist <- country_nodes %>% map(\(x) {
+      country_string <- x %>% html_elements("h3") %>% html_text()
+      country_name <- str_replace_all(country_string, c("^[\\s\\n]*" = "", "[\\s\\n]*$" = ""))
+      if (length(country_string) != 1) stop(paste("Wrong number of country names:", country_name, collapse = "; "))
+      entry_month <- x %>% html_elements("time") %>% html_text()
+      last_5_months <- x %>% html_elements(".o-state-entry")
+      months <- last_5_months %>% html_attr("title")
+      # states <- last_5_months %>% html_element("a>span:first-of-type") %>% html_attr("class")
+      states <- 1:5 %>% 
+        map(\(i) html_attr(html_element(last_5_months, glue("a>span:nth-of-type({i})")), "class")) %>%
+        unlist() %>% matrix(ncol = 5) %>% apply(1, \(mo) {paste(na.omit(mo), collapse = ", ")})
+      if (length(states) != length(months)) stop(glue("Length of states and months do not match for {country_name}"))
+      month_states <- tibble(country = country_name, entry_month = entry_month, month = months, status = states)
+      text <- x %>% html_elements(".o-crisis-states__detail") %>%
+        html_elements("p") %>% html_text()
+      return(list(name = country_name, entry_month = entry_month, past5 = month_states, text = text))
+    })
+    return(outlist)
+  }
+
   base_url <- glue("https://www.crisisgroup.org/crisiswatch/database?crisis_state=&created=custom&from_month={from_month}&from_year={from_year}&to_month={to_month}&to_year={to_year}&page=")
   page0 <- read_html(paste0(base_url, 0))
-    cw_page0 <- read_cw_page(page0)
-    total_pages <- (page0 %>% html_elements(".o-pagination") %>% html_elements("span") %>% html_text() %>%
-                      str_extract("\\d+ of (\\d+)", group = T) %>% na.omit() %>% as.numeric()) - 1
+  cw_page0 <- read_cw_page(page0)
+  total_pages <- (page0 %>% html_elements(".o-pagination") %>% html_elements("span") %>% html_text() %>%
+                    str_extract("\\d+ of (\\d+)", group = T) %>% na.omit() %>% as.numeric()) - 1
     
-    progress_update <- function(current, total, start_time) { 
-      duration <- Sys.time() - start_time 
-      percentage <- current/total
-      expected_duration <- duration / percentage
-      remaining <- expected_duration - duration
-      end_time <-  start_time + expected_duration
-      print(glue("Reading page {current} of {total}; {round(duration, 2)} {units(duration)} elapsed; {round(remaining, 2)} {units(remaining)} remaining ({end_time})"))
-    }
+  progress_update <- function(current, total, start_time) { 
+    duration <- Sys.time() - start_time 
+    percentage <- current/total
+    expected_duration <- duration / percentage
+    remaining <- expected_duration - duration
+    end_time <-  start_time + expected_duration
+    print(glue("Reading page {current} of {total}; {round(duration, 2)} {units(duration)} elapsed; {round(remaining, 2)} {units(remaining)} remaining ({end_time})"))
+  }
     
-    start_time <- Sys.time()
+  start_time <- Sys.time()
   cw_pages_new <- vector(mode = "list", length = total_pages + 1)
   cw_pages_new[[1]] <- cw_page0
-    for (i in 1:total_pages) {
-      if (i %% 10 == 0) progress_update(i, total_pages, start_time)
+  for (i in 1:total_pages) {
+    if (i %% 10 == 0) progress_update(i, total_pages, start_time)
     url <- paste0(base_url, i)
-      page <- read_html(url)
+    page <- read_html(url)
     cw_pages_new[[i + 1]] <- read_cw_page(page)
-    }
+  }
   cw_pages_new <- unlist(cw_pages_new, recursive = F)
   names(cw_pages_new) <- unlist(map(cw_pages_new, \(x) paste(x$name, x$entry_month, sep = " - ")))
   cw_pages <- if (exists("cw_pages")) c(cw_pages_new, cw_pages) else cw_pages_new
@@ -1136,7 +1176,8 @@ write_crisiswatch_csv <- function() {
     separate_longer_delim(iso3, ", ")
   
   crisis_watch <- cw_df %>%
-    select(iso3, year, month, CW_risk = risk, CW_alert = conflict_alert, CW_resolution_opportunity = resolution_opportunity) %>%
+    mutate(status = str_replace(str_to_sentence(status), "-", " ")) %>%
+    select(iso3, year, month, CW_status = status, CW_risk = risk, CW_alert = conflict_alert, CW_resolution_opportunity = resolution_opportunity) %>%
     summarize(.by = c(iso3, year, month), across(starts_with("CW"), ~ max(.x, na.rm = T)))
   
   cw_text <- map(cw_pages, \(x) x$text)
@@ -1364,13 +1405,15 @@ write_polecat_icews_csv <- function() {
     rename(iso3 = country) %>%
     select(-date)
   write_csv(polecat2, file.path(cm_dir, "polecat-icews.csv"))
-  
+}
+
+ write_icews_csv <- function() { 
   # ICEWS by itself
-  icews <- read_csv("/Users/bennotkin/Downloads/FCV_training_dataset_with_conflictforecast_data_and_icews.csv") %>%
-    select(iso3, year, month, contains("ICEWS")) %>%
-    filter(if_any(-c(iso3, year, month), ~ !is.na(.x)))
+  # icews <- read_csv("/Users/bennotkin/Downloads/FCV_training_dataset_with_conflictforecast_data_and_icews.csv") %>%
+  #   select(iso3, year, month, contains("ICEWS")) %>%
+  #   filter(if_any(-c(iso3, year, month), ~ !is.na(.x)))
   # write_csv(icews, "source-data/icews.csv")
-  # icews <- read_csv("source-data/icews.csv", col_types = "cdddddddddddddddddddddd")
+  icews <- read_csv("source-data/icews.csv", col_types = "cdddddddddddddddddddddd")
   write_csv(icews, file.path(cm_dir, "icews.csv"))
 }
 
@@ -1541,7 +1584,7 @@ write_crm_fragility_csv <- function() {
   }
 
   crm <- read_many_runs("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/manual/runs", index_only = F, lazy = T) %>%
-    filter(`Data Level` == "Dimension Value" & Outlook %in% c("Overall", "Underlying"), Dimension == "Conflict and Fragility") %>%
+    filter(`Data Level` == "Dimension Value", Dimension == "Conflict and Fragility") %>%
     mutate(
       iso3 = Country, yearmon = as.yearmon(Date),
       indicator = glue("CRM {Outlook} Fragility and Conflict"), value_numeric = Value) %>%
@@ -1553,7 +1596,9 @@ write_crm_fragility_csv <- function() {
 }
 
 write_fcs_csv <- function() {
-  fcs <- read_csv("/Users/bennotkin/Documents/world-bank/crm/crm-db/output/inputs-archive/fcs.csv") %>%
+  # source-data/fcs.csv is created by fcs_historical_collect() at
+  # https://github.com/compoundrisk/monitor/blob/databricks/src/fns/indicators.R
+  fcs <- read_csv("source-data/fcs.csv") %>%
     mutate(FCS_normalised = case_when(!is.na(FCV_status) ~ 10, T ~ 0)) %>%
     rowwise() %>%
     mutate(yearmon = list(seq.Date(access_date, by = "month", length.out = 12))) %>%
@@ -1561,9 +1606,25 @@ write_fcs_csv <- function() {
     unnest(yearmon) %>%
     mutate(yearmon = as.yearmon(yearmon)) %>%
     slice_max(access_date, by = c(Country, yearmon)) %>%
-    mutate(.keep = "none", iso3 = Country, yearmon = yearmon, indicator = "FCS List", value_numeric = FCS_normalised, value_character = FCV_status) %>%
+    mutate(.keep = "none",
+      iso3 = Country, yearmon = yearmon, indicator = "FCS List",
+      value_numeric = FCS_normalised, value_character = FCV_status) %>%
     sjmisc::replace_na(value_character, value = "Non-FCS") %>%
       pivot_wider(names_from = indicator, values_from = value_numeric) %>%
       mutate(.keep = "unused", year = lubridate::year(yearmon), month = lubridate::month(yearmon))
   write_csv(fcs, file.path(cm_dir, "fcs-list.csv"))
+}
+
+write_wbg_forecast_csv <- function() {
+  model <- read_xlsx("source-data/wbg-conflictforecast.xlsx") %>%
+    mutate(year = 2024, month = 5) %>%
+    mutate(
+      conflict = pred_last > p_star,
+      outbreak = conflict & `brd>26 in 2023` < 1,
+      probability = case_when(`brd>26 in 2023` == 1 ~ NA, T ~ pred_last),
+      status = case_when(`brd>26 in 2023` == 1 ~ "In conflict", outbreak ~ "High", T ~ "Low")) %>%
+    select(iso3, year, month, horizon, probability, status) %>% 
+    pivot_wider(names_from = horizon, values_from = c(probability, status)) %>%
+    rename_with(.cols = matches("12$|24$|36$"), ~ paste0("WBG_FORECAST_", .x, "m"))
+  write_csv(model, file.path(cm_dir, "wbg-forecast.csv"))
 }

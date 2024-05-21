@@ -70,8 +70,9 @@ write_natural_resource_rents_csv()
 write_epr_csv()
 write_crisiswatch_csv()
 write_evacuations_csv()
-write_polecat_csv()
 write_polecat_icews_csv()
+write_polecat_csv() # Do we still want this if we have the above?
+write_icews_csv() # Do we still want this if we have the above?
 write_conflictforecast_csv()
 write_views_csv()
 write_bti_csv()

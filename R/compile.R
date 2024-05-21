@@ -64,9 +64,9 @@ training <- Reduce(
     read_csv(file.path(cm_dir, "imf-rsui.csv")),
     read_csv(file.path(cm_dir, "wbg-resource-rents.csv")),
     read_csv(file.path(cm_dir, "wbg-evacuations.csv")),
-    read_csv(file.path(cm_dir, "polecat.csv")),
     read_csv(file.path(cm_dir, "polecat-icews.csv")),
-    read_csv(file.path(cm_dir, "icews.csv")),
+    read_csv(file.path(cm_dir, "polecat.csv")), # Do we want this if we have polecat-icews.csv?
+    read_csv(file.path(cm_dir, "icews.csv")), # Do we want this if we have polecat-icews.csv?
     read_csv(file.path(cm_dir, "conflictforecast-org.csv")),
     read_csv(file.path(cm_dir, "icg-crisiswatch.csv")),
     read_csv(file.path(cm_dir, "wbg-income-levels.csv")),
