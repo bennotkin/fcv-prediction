@@ -731,7 +731,8 @@ write_acaps_risklist_csv <- function() {
   risk_list <- df %>%
     mutate(
       yearmon = as.yearmon(last_risk_update),
-      risk_level = as.numeric(ordered(risk_level, levels = c(NA, "Low", "Medium", "High")))) %>%
+      risk_level = as.numeric(ordered(risk_level, levels = c(NA, "Low", "Medium", "High"))),
+      risk_title = str_replace(risk_title, "\\n", "")) %>%
     select(iso3, yearmon, ACAPS_risk_level = risk_level, ACAPS_risk_title = risk_title) %>%
     slice_max(by = c(iso3, yearmon), order_by = ACAPS_risk_level, with_ties = F, na_rm = T) %>%
     mutate(.after = yearmon, year = lubridate::year(yearmon), month = lubridate::month(yearmon))
@@ -1197,7 +1198,8 @@ write_crisiswatch_csv <- function() {
     separate_longer_delim(iso3, delim = ", ") %>%
     mutate(text = paste(month, text, sep = ": ")) %>%
     summarize(.by = c(Location, iso3, month), text = paste(text, collapse = "\n\n"))
-  write_csv(cw_text_df, "crisiswatch-text.csv")
+  write_excel_csv(cw_text_df, "crisiswatch-text.csv")
+  openxlsx2::write_xlsx(cw_text_df, "crisiswatch-text.xlsx")
   write_csv(crisis_watch, file.path(cm_dir, "icg-crisiswatch.csv"))
 }
 
