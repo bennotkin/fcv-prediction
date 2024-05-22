@@ -1198,8 +1198,8 @@ write_crisiswatch_csv <- function() {
     separate_longer_delim(iso3, delim = ", ") %>%
     mutate(text = paste(month, text, sep = ": ")) %>%
     summarize(.by = c(Location, iso3, month), text = paste(text, collapse = "\n\n"))
-  write_excel_csv(cw_text_df, "crisiswatch-text.csv")
-  openxlsx2::write_xlsx(cw_text_df, "crisiswatch-text.xlsx")
+  write_excel_csv(cw_text_df, "risk-monitor/output/crisiswatch-text.csv")
+  openxlsx2::write_xlsx(cw_text_df, "risk-monitor/output/crisiswatch-text.xlsx")
   write_csv(crisis_watch, file.path(cm_dir, "icg-crisiswatch.csv"))
 }
 
